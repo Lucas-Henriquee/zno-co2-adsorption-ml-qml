@@ -1,0 +1,9 @@
+name: qml-zno-visualization
+channels:
+  - conda-forge
+dependencies:
+  - python=3.10
+  - pymol-open-source
+  - ase
+  - matplotlib
+  - pillow

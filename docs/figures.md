@@ -1,5 +1,38 @@
 # Figures
 
+## Adsorption structures
+
+For PyMOL ray tracing, create the separate visualization environment:
+
+```bash
+conda env create -f environments/pymol.yml
+conda run -n qml-zno-visualization python -m scripts.visualization.render_adsorption_structures \
+  --view 3d --renderer pymol
+```
+
+The exporter saves a combined PNG, three individual PNGs, and editable PyMOL
+sessions (`.pse`). Only the exposed layer from the saved structure is displayed,
+with one CO2 molecule and no periodic copies. All panels use the same scale, with
+view directions chosen to reduce overlap of the molecular atoms.
+Dark halos mark the atoms defining the starting site. The labels report the two
+C–O distances. The original DFT files are read without modification.
+
+Render the saved DFT structures in 3D:
+
+```bash
+conda run -n qml-zno-simulation python -m scripts.visualization.render_adsorption_structures --view 3d
+```
+
+The PNG uses the same camera and scale for all sites, with labels below the
+panels. Camera angles can be set with `--elevation` and `--azimuth`.
+The outlines mark the surface atoms that defined each starting site.
+Only the exposed surface region is displayed; coordinates are read from the
+saved DFT XYZ files and checked against `results/dft_summary.csv`.
+
+If geometry warnings are reported, review them before using the figure in the
+paper. To inspect a draft, add `--allow-geometry-warnings`; its filename includes
+`_diagnostic`. The earlier projections remain available through `--view combined`.
+
 ## New analysis runs
 
 ```bash

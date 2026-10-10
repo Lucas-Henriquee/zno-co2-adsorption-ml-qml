@@ -51,10 +51,14 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--output-dir", type=Path, default=RESULTS_DIR / "analysis/figures")
     parser.add_argument(
-        "--view", choices=("side", "top", "both", "combined"), default="combined",
-        help="Render one view, two separate PNGs, or one combined PNG.",
+        "--view", choices=("side", "top", "both", "combined", "3d"), default="3d",
+        help="Render a 3D figure, one projection, or two projections.",
     )
+    parser.add_argument("--elevation", type=float, default=18.0, help="3D camera elevation in degrees.")
+    parser.add_argument("--azimuth", type=float, default=-110.0, help="3D camera azimuth in degrees.")
     parser.add_argument("--dpi", type=int, default=600)
+    parser.add_argument("--renderer", choices=("matplotlib", "pymol"), default="matplotlib",
+                        help="3D rendering engine; PyMOL must be installed separately.")
     parser.add_argument(
         "--allow-geometry-warnings", action="store_true",
         help="Create a diagnostic draft despite warnings; never labels it publication-ready.",
@@ -375,6 +379,101 @@ def save_combined(data_by_site: dict[str, SiteData], args, suffix: str) -> None:
     plt.close(fig)
 
 
+def save_3d(data_by_site: dict[str, SiteData], args, suffix: str) -> None:
+    """Render shaded spheres from saved coordinates with a common camera and scale."""
+    fig = plt.figure(figsize=(9.0, 3.5))
+    longitude = np.linspace(0, 2 * np.pi, 28)
+    latitude = np.linspace(0, np.pi, 18)
+    sphere = np.array([
+        np.outer(np.cos(longitude), np.sin(latitude)),
+        np.outer(np.sin(longitude), np.sin(latitude)),
+        np.outer(np.ones_like(longitude), np.cos(latitude)),
+    ])
+    camera = np.array([
+        np.cos(np.deg2rad(args.elevation)) * np.cos(np.deg2rad(args.azimuth)),
+        np.cos(np.deg2rad(args.elevation)) * np.sin(np.deg2rad(args.azimuth)),
+        np.sin(np.deg2rad(args.elevation)),
+    ])
+    horizontal = np.cross(camera, [0.0, 0.0, 1.0])
+    horizontal /= np.linalg.norm(horizontal)
+    vertical = np.cross(camera, horizontal)
+    prepared = {}
+    for site, data in data_by_site.items():
+        positions = data.atoms.positions.copy()
+        positions[:, :2] -= positions[-2, :2]
+        positions[:, 2] -= data.atoms.positions[:-3, 2].max()
+        visible = [
+            i for i in top_layer_indices(data.atoms)
+            if np.linalg.norm(positions[i, :2]) <= 3.4 or i in data.site_atoms
+        ] + list(range(len(data.atoms) - 3, len(data.atoms)))
+        prepared[site] = (positions, visible)
+    all_points = np.concatenate([p[indices] for p, indices in prepared.values()])
+    low, high = all_points.min(axis=0) - 0.75, all_points.max(axis=0) + 0.75
+    extent = high - low
+
+    for column, (site, letter) in enumerate(zip(SITES, "abc")):
+        data = data_by_site[site]
+        atoms = data.atoms
+        positions, visible = prepared[site]
+        ax = fig.add_subplot(1, 3, column + 1, projection="3d")
+        ax.set_position([0.015 + column * 0.33, 0.18, 0.32, 0.80])
+        # C–O bonds and nearby Zn–O connections use the full 3D distances.
+        carbon = len(atoms) - 2
+        slab_indices = [i for i in visible if i < len(atoms) - 3]
+        pairs = [(carbon, len(atoms) - 3), (carbon, len(atoms) - 1)]
+        pairs += [
+            (i, j) for i in slab_indices for j in slab_indices
+            if j > i and {atoms[i].symbol, atoms[j].symbol} == {"Zn", "O"}
+            and 1.4 <= atoms.get_distance(i, j) <= 2.5
+        ]
+        for i, j in pairs:
+            p = positions[[i, j]]
+            ax.plot(*p.T, color="#8D98A5", linewidth=2.2, solid_capstyle="round")
+        for i in visible:
+            radius = RADII[atoms[i].symbol] * 1.35
+            surface = positions[i, :, None, None] + radius * sphere
+            ax.plot_surface(
+                *surface, color=COLORS[atoms[i].symbol], linewidth=0,
+                antialiased=True, shade=True, rstride=1, cstride=1,
+            )
+            if i in data.site_atoms:
+                # A camera-facing ring tracks the original surface atom identity.
+                angles = np.linspace(0, 2 * np.pi, 80)
+                ring = positions[i, :, None] + (radius + 0.10) * (
+                    horizontal[:, None] * np.cos(angles)
+                    + vertical[:, None] * np.sin(angles)
+                ) + 0.05 * camera[:, None]
+                ax.plot(*ring, color="#202933", linewidth=1.0)
+        # Place element symbols on the visible face of each molecular sphere.
+        for i in range(len(atoms) - 3, len(atoms)):
+            p = positions[i] + RADII[atoms[i].symbol] * 1.45 * camera
+            ax.text(*p, atoms[i].symbol, ha="center", va="center", fontsize=7,
+                    color="white", fontweight="bold", zorder=100)
+        for number, oxygen in enumerate((len(atoms) - 3, len(atoms) - 1)):
+            p = (positions[carbon] + positions[oxygen]) / 2
+            p += (1.2 if number == 0 else -1.2) * horizontal + 0.10 * camera
+            ax.text(
+                *p, f"{atoms.get_distance(carbon, oxygen):.3f} Å",
+                ha="center", va="center", fontsize=7,
+                bbox={"facecolor": "white", "edgecolor": "none", "alpha": 0.85, "pad": 1},
+            )
+        ax.set_xlim(low[0], high[0])
+        ax.set_ylim(low[1], high[1])
+        ax.set_zlim(low[2], high[2])
+        ax.set_box_aspect(extent)
+        ax.view_init(elev=args.elevation, azim=args.azimuth)
+        ax.set_proj_type("ortho")
+        ax.set_axis_off()
+        fig.text(0.175 + column * 0.33, 0.14, f"({letter}) {SITE_NAMES[site]}",
+                 ha="center", fontsize=10, fontweight="semibold")
+    add_legend(fig)
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    target = args.output_dir / f"zno_adsorption_sites_3d{suffix}.png"
+    fig.savefig(target, dpi=args.dpi, facecolor="white", bbox_inches="tight", pad_inches=0.08)
+    plt.close(fig)
+    print(f"[saved] {target}")
+
+
 def main() -> None:
     args = parse_args()
     summary = load_summary(args.summary)
@@ -403,7 +502,14 @@ def main() -> None:
         )
 
     suffix = "_diagnostic" if warnings else ""
-    if args.view == "combined":
+    if args.renderer == "pymol":
+        if args.view != "3d":
+            raise SystemExit("The PyMOL renderer requires --view 3d.")
+        from scripts.visualization.render_adsorption_pymol import save_pymol
+        save_pymol(data_by_site, args, suffix)
+    elif args.view == "3d":
+        save_3d(data_by_site, args, suffix)
+    elif args.view == "combined":
         save_combined(data_by_site, args, suffix)
     else:
         views = ("side", "top") if args.view == "both" else (args.view,)
