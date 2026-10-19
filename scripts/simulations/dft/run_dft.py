@@ -119,6 +119,11 @@ def apply_bottom_layer_constraint(atoms, adsorbate_atoms: int = 0, slab_free_fra
     atoms.set_constraint(FixAtoms(indices=fixed_indices))
 
 
+def max_free_force(atoms) -> float:
+    """Largest force norm on the free atoms (FixAtoms forces are zeroed by ASE)."""
+    return float(np.linalg.norm(atoms.get_forces(), axis=1).max())
+
+
 def optimize_structure(
     atoms,
     output_dir: Path,
@@ -160,7 +165,16 @@ def optimize_structure(
         )
 
         try:
-            dyn.run(fmax=fmax, steps=steps)
+            converged = dyn.run(fmax=fmax, steps=steps)
+            # BFGS.run returns False when it stops at the step limit; it does not raise.
+            fmax_final = max_free_force(trial)
+            if not converged or fmax_final > fmax:
+                raise RuntimeError(
+                    f"{label}: BFGS did not converge in {steps} steps "
+                    f"(fmax {fmax_final:.3f} > {fmax} eV/Ang)"
+                )
+            trial.info["n_steps"] = int(dyn.nsteps)
+            trial.info["fmax_final"] = fmax_final
             energy = float(trial.get_potential_energy())
             calc.write(str(output_dir / f"{label}.gpw"), mode="all")
             write(output_dir / f"{label}_optimized.xyz", trial)
@@ -225,7 +239,13 @@ def co2_reference_energy(
         trajectory=str(output_dir / f"co2_ref.{profile_name}.traj"),
         logfile=str(output_dir / f"co2_ref.{profile_name}.opt.log"),
     )
-    dyn.run(fmax=fmax, steps=steps)
+    converged = dyn.run(fmax=fmax, steps=steps)
+    fmax_final = max_free_force(co2)
+    if not converged or fmax_final > fmax:
+        raise RuntimeError(
+            f"co2_ref.{profile_name}: BFGS did not converge in {steps} steps "
+            f"(fmax {fmax_final:.3f} > {fmax} eV/Ang)"
+        )
 
     energy = float(co2.get_potential_energy())
     calc.write(str(output_dir / f"co2_ref.{profile_name}.gpw"), mode="all")
@@ -397,7 +417,7 @@ def run_dft_workflow(args: argparse.Namespace) -> None:
 
         try:
             with timer(f"DFT clean slab → {material}"):
-                clean_energy, clean_gap, _, clean_profile = optimize_structure(
+                clean_energy, clean_gap, clean_atoms_opt, clean_profile = optimize_structure(
                     atoms=clean_atoms_in,
                     output_dir=material_out / "clean",
                     label="clean_slab",
@@ -466,6 +486,10 @@ def run_dft_workflow(args: argparse.Namespace) -> None:
                         "adsorption_energy_ev": adsorption_energy,
                         "clean_band_gap_ev": clean_gap,
                         "adsorbed_band_gap_ev": ads_gap,
+                        "clean_n_steps": clean_atoms_opt.info["n_steps"],
+                        "clean_fmax_final_ev_per_ang": clean_atoms_opt.info["fmax_final"],
+                        "adsorbed_n_steps": ads_atoms_opt.info["n_steps"],
+                        "adsorbed_fmax_final_ev_per_ang": ads_atoms_opt.info["fmax_final"],
                         **geometry_metrics,
                     }
                 )

@@ -18,10 +18,10 @@ from scripts.workflows import run_simulations as simulations
 
 ROOT = Path(__file__).resolve().parents[1]
 BASELINE = "4a2ff4a"
-# build_geometries.py is deliberately excluded: its ZnO geometry was corrected
-# (Wyckoff 2b basis, top-plane bridge pair, 2x2 cell); see tests/test_geometry.py.
+# build_geometries.py and run_dft.py are deliberately excluded: the ZnO geometry
+# was corrected and BFGS convergence is now checked; see tests/test_geometry.py
+# and tests/test_dft_convergence.py.
 SOURCES = {
-    "run_dft.py": "scripts/simulations/dft/run_dft.py",
     "run_tddft.py": "scripts/simulations/tddft/run_tddft.py",
     "run_md.py": "scripts/simulations/md/run_md.py",
     "run_neb.py": "scripts/simulations/neb/run_neb.py",
