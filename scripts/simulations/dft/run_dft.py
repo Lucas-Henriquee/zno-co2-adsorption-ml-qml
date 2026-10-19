@@ -180,6 +180,9 @@ def optimize_structure(
             write(output_dir / f"{label}_optimized.xyz", trial)
             write(output_dir / f"{label}_optimized.cif", trial)
             gap = compute_band_gap_safe(calc)
+            trial.info["band_gap_gamma"] = compute_band_gap_gamma(
+                calc, kpts, output_dir / f"{label}.{profile_name}.gap_gamma.txt"
+            )
             return energy, gap, trial, profile_name
         except Exception as exc:
             last_error = exc
@@ -203,6 +206,31 @@ def compute_band_gap_safe(calc) -> float:
     except Exception as exc:
         print0(f"[dft] warning: band gap not computed ({type(exc).__name__}: {exc})")
         return float("nan")
+
+
+def compute_band_gap_gamma(calc, kpts, txt_file) -> float:
+    """Kohn-Sham gap on a Gamma-centred grid of the same size as the relaxation mesh.
+
+    An even Monkhorst-Pack mesh skips Gamma, where the ZnO gap lies, so the gap on
+    the relaxation mesh is only an upper bound. A non-self-consistent (fixed-density)
+    calculation adds Gamma without changing the energies used for Eads.
+    """
+    size = tuple(int(n) for n in kpts)
+    if all(n % 2 == 1 for n in size):
+        return compute_band_gap_safe(calc)  # odd meshes already contain Gamma
+    try:
+        n_occupied = int(round(calc.get_number_of_electrons() / 2))
+        gamma_calc = calc.fixed_density(
+            kpts={"size": size, "gamma": True},
+            symmetry="off",
+            nbands=n_occupied + 12,
+            convergence={"bands": n_occupied + 8},
+            txt=str(txt_file),
+        )
+    except Exception as exc:
+        print0(f"[dft] warning: Gamma-grid band gap not computed ({type(exc).__name__}: {exc})")
+        return float("nan")
+    return compute_band_gap_safe(gamma_calc)
 
 
 def co2_reference_energy(
@@ -270,20 +298,30 @@ def adsorption_geometry_metrics(atoms) -> dict[str, float]:
     c_idx = len(atoms) - 2
     o2_idx = len(atoms) - 1
     slab_indices = np.arange(len(atoms) - 3)
+    metal_indices = [int(i) for i in slab_indices if atoms[int(i)].symbol != "O"]
 
-    c_o_1 = float(atoms.get_distance(c_idx, o1_idx))
-    c_o_2 = float(atoms.get_distance(c_idx, o2_idx))
-    oco_angle = float(atoms.get_angle(o1_idx, c_idx, o2_idx))
+    # mic=True: an O that crossed the cell boundary is measured to its nearest image.
+    c_o_1 = float(atoms.get_distance(c_idx, o1_idx, mic=True))
+    c_o_2 = float(atoms.get_distance(c_idx, o2_idx, mic=True))
+    oco_angle = float(atoms.get_angle(o1_idx, c_idx, o2_idx, mic=True))
 
+    # Height of C above the topmost slab atom; not a distance to any atom.
     slab_z_max = float(np.max(atoms.positions[slab_indices, 2]))
     carbon_z = float(atoms.positions[c_idx, 2])
     carbon_surface_distance = carbon_z - slab_z_max
+
+    c_min_slab = float(atoms.get_distances(c_idx, slab_indices, mic=True).min())
+    o_min_metal = float(min(
+        atoms.get_distances(o_idx, metal_indices, mic=True).min() for o_idx in (o1_idx, o2_idx)
+    ))
 
     return {
         "co_bond_1_ang": c_o_1,
         "co_bond_2_ang": c_o_2,
         "oco_angle_deg": oco_angle,
         "c_surface_distance_ang": carbon_surface_distance,
+        "c_min_slab_distance_ang": c_min_slab,
+        "o_min_metal_distance_ang": o_min_metal,
     }
 
 
@@ -358,10 +396,14 @@ def make_failure_row(
         "adsorption_energy_ev": float("nan"),
         "clean_band_gap_ev": float("nan"),
         "adsorbed_band_gap_ev": float("nan"),
+        "clean_band_gap_gamma_ev": float("nan"),
+        "adsorbed_band_gap_gamma_ev": float("nan"),
         "co_bond_1_ang": float("nan"),
         "co_bond_2_ang": float("nan"),
         "oco_angle_deg": float("nan"),
         "c_surface_distance_ang": float("nan"),
+        "c_min_slab_distance_ang": float("nan"),
+        "o_min_metal_distance_ang": float("nan"),
     }
 
 
@@ -533,6 +575,8 @@ def run_dft_workflow(args: argparse.Namespace) -> None:
                         "adsorption_energy_ev": adsorption_energy,
                         "clean_band_gap_ev": slab_gap,
                         "adsorbed_band_gap_ev": ads_gap,
+                        "clean_band_gap_gamma_ev": slab_atoms_opt.info.get("band_gap_gamma", float("nan")),
+                        "adsorbed_band_gap_gamma_ev": ads_atoms_opt.info.get("band_gap_gamma", float("nan")),
                         "clean_n_steps": slab_atoms_opt.info["n_steps"],
                         "clean_fmax_final_ev_per_ang": slab_atoms_opt.info["fmax_final"],
                         "adsorbed_n_steps": ads_atoms_opt.info["n_steps"],
