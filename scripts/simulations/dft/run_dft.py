@@ -194,15 +194,15 @@ def optimize_structure(
 
 
 def compute_band_gap_safe(calc) -> float:
+    """Kohn-Sham band gap via ase.dft.bandgap; a failure is reported, not hidden."""
     try:
-        from gpaw.bandgap import bandgap
-        gap_data = bandgap(calc)
-    except Exception:
-        return float("nan")
+        from ase.dft.bandgap import bandgap
 
-    if isinstance(gap_data, (tuple, list)) and gap_data:
-        return float(gap_data[0])
-    return float(gap_data)
+        gap, _, _ = bandgap(calc, output=None)  # output=None: no print on every MPI rank
+        return float(gap)
+    except Exception as exc:
+        print0(f"[dft] warning: band gap not computed ({type(exc).__name__}: {exc})")
+        return float("nan")
 
 
 def co2_reference_energy(
@@ -431,8 +431,6 @@ def run_dft_workflow(args: argparse.Namespace) -> None:
                 f"[dft] {material} clean slab energy = {clean_energy:.6f} eV "
                 f"(profile={clean_profile})"
             )
-            clean_profile_cfg = profile_catalog[clean_profile]
-            clean_co2_energy = get_co2_reference_for_profile(clean_profile)
         except Exception as exc:
             message = f"{type(exc).__name__}: {exc}"
             print0(f"[dft] {material} clean slab failed: {message}")
@@ -448,10 +446,57 @@ def run_dft_workflow(args: argparse.Namespace) -> None:
             flush_summary()
             continue
 
+        # Clean slab per SCF profile: Eads subtracts terms of one profile only.
+        clean_by_profile = {clean_profile: (clean_energy, clean_gap, clean_atoms_opt)}
+
+        def clean_for_profile(profile_name: str):
+            if profile_name not in clean_by_profile:
+                slab_in = read_geometry(GEOMETRY_DIR / material / "clean_slab.traj")
+                apply_bottom_layer_constraint(slab_in, adsorbate_atoms=0)
+                with timer(f"DFT clean slab → {material} ({profile_name})"):
+                    energy, gap, atoms_opt, _ = optimize_structure(
+                        atoms=slab_in,
+                        output_dir=material_out / f"clean_{profile_name}",
+                        label="clean_slab",
+                        ecut=args.ecut,
+                        kpts=kpts,
+                        fmax=args.fmax,
+                        steps=args.steps,
+                        profiles=(profile_catalog[profile_name],),
+                    )
+                clean_by_profile[profile_name] = (energy, gap, atoms_opt)
+            return clean_by_profile[profile_name]
+
+        try:
+            get_co2_reference_for_profile(clean_profile)
+        except Exception as exc:
+            message = f"{type(exc).__name__}: {exc}"
+            print0(f"[dft] CO2 reference ({clean_profile}) failed: {message}")
+            for site in sites:
+                upsert_row(
+                    {
+                        **make_failure_row(
+                            material=material,
+                            site=site,
+                            status="co2_ref_failed",
+                            message=message,
+                        ),
+                        "clean_slab_energy_ev": clean_energy,
+                        "clean_band_gap_ev": clean_gap,
+                    }
+                )
+            flush_summary()
+            continue
+
+        # The adsorbate starts from the clean-slab profile and may fall back to later ones.
+        profile_names = [str(profile["name"]) for profile in profiles_for_material]
+        ads_profiles = tuple(profiles_for_material[profile_names.index(clean_profile):])
+
         for site in sites:
             case_dir = material_out / site
             ads_atoms_in = read_geometry(GEOMETRY_DIR / material / f"co2_{site}.traj")
             apply_bottom_layer_constraint(ads_atoms_in, adsorbate_atoms=3)
+            clean_co2_energy = float("nan")
 
             try:
                 with timer(f"DFT adsorption → {material} | {site}"):
@@ -463,10 +508,12 @@ def run_dft_workflow(args: argparse.Namespace) -> None:
                         kpts=kpts,
                         fmax=args.fmax,
                         steps=args.steps,
-                        profiles=(clean_profile_cfg,),
+                        profiles=ads_profiles,
                     )
 
-                adsorption_energy = ads_energy - clean_energy - clean_co2_energy
+                slab_energy, slab_gap, slab_atoms_opt = clean_for_profile(ads_profile)
+                clean_co2_energy = get_co2_reference_for_profile(ads_profile)
+                adsorption_energy = ads_energy - slab_energy - clean_co2_energy
                 geometry_metrics = adsorption_geometry_metrics(ads_atoms_opt)
                 print0(
                     f"[dft] {material} {site} adsorption energy = {adsorption_energy:.6f} eV "
@@ -480,14 +527,14 @@ def run_dft_workflow(args: argparse.Namespace) -> None:
                         "dft_status": "ok",
                         "dft_profile": ads_profile,
                         "error_message": "",
-                        "clean_slab_energy_ev": clean_energy,
+                        "clean_slab_energy_ev": slab_energy,
                         "adsorbed_energy_ev": ads_energy,
                         "co2_reference_energy_ev": clean_co2_energy,
                         "adsorption_energy_ev": adsorption_energy,
-                        "clean_band_gap_ev": clean_gap,
+                        "clean_band_gap_ev": slab_gap,
                         "adsorbed_band_gap_ev": ads_gap,
-                        "clean_n_steps": clean_atoms_opt.info["n_steps"],
-                        "clean_fmax_final_ev_per_ang": clean_atoms_opt.info["fmax_final"],
+                        "clean_n_steps": slab_atoms_opt.info["n_steps"],
+                        "clean_fmax_final_ev_per_ang": slab_atoms_opt.info["fmax_final"],
                         "adsorbed_n_steps": ads_atoms_opt.info["n_steps"],
                         "adsorbed_fmax_final_ev_per_ang": ads_atoms_opt.info["fmax_final"],
                         **geometry_metrics,
@@ -514,6 +561,13 @@ def run_dft_workflow(args: argparse.Namespace) -> None:
 
     flush_summary()
     print0(f"[dft] wrote summary: {output_csv}")
+
+    # A failed case must fail the workflow, so dependent methods do not run on it.
+    requested = [(material, site) for material in materials for site in sites]
+    failed = [key for key in requested if rows_by_key.get(key, {}).get("dft_status") != "ok"]
+    if failed:
+        print0(f"[dft] {len(failed)} case(s) did not finish ok: {failed}")
+        raise SystemExit(1)
 
 
 def main() -> None:
