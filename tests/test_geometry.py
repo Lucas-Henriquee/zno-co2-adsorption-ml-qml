@@ -21,10 +21,10 @@ class ZnOGeometryTests(unittest.TestCase):
         self.assertGreater(distances.min(), 1.9)  # the (0, 0, z) basis gave 0.61 A
         self.assertEqual(np.bincount(i, minlength=len(bulk)).tolist(), [4, 4, 4, 4])
 
-    def test_slab_is_2x2_with_four_planes(self):
+    def test_slab_is_2x1_with_four_planes(self):
         slab = geometry.build_slab("ZnO")
-        self.assertEqual(len(slab), 32)
-        np.testing.assert_allclose(slab.cell.lengths()[:2], [6.498, 10.412], atol=1e-3)
+        self.assertEqual(len(slab), 16)
+        np.testing.assert_allclose(slab.cell.lengths()[:2], [6.498, 5.206], atol=1e-3)
         self.assertEqual(len(np.unique(np.round(slab.positions[:, 2], 3))), 4)
 
     def test_bridge_uses_surface_dimer(self):
