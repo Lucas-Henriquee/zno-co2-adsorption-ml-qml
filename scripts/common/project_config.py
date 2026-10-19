@@ -36,6 +36,8 @@ MATERIALS: dict[str, MaterialSpec] = {
         metal_symbol="Zn",
         structure="wurtzite",
         miller_index=(1, 0, 0),
+        # 2x2 surface cell: CO2 stays >= 4.18 A from its periodic copy in any orientation.
+        repeat=(2, 2, 1),
     ),
     "TiO2": MaterialSpec(
         name="TiO2",

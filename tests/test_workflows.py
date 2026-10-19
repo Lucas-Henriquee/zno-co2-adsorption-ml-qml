@@ -18,8 +18,9 @@ from scripts.workflows import run_simulations as simulations
 
 ROOT = Path(__file__).resolve().parents[1]
 BASELINE = "4a2ff4a"
+# build_geometries.py is deliberately excluded: its ZnO geometry was corrected
+# (Wyckoff 2b basis, top-plane bridge pair, 2x2 cell); see tests/test_geometry.py.
 SOURCES = {
-    "build_geometries.py": "scripts/simulations/dft/build_geometries.py",
     "run_dft.py": "scripts/simulations/dft/run_dft.py",
     "run_tddft.py": "scripts/simulations/tddft/run_tddft.py",
     "run_md.py": "scripts/simulations/md/run_md.py",

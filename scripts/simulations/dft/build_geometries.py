@@ -28,7 +28,8 @@ def build_bulk(material: str):
     if material == "ZnO":
         return crystal(
             symbols=["Zn", "O"],
-            basis=[(0.0, 0.0, 0.0), (0.0, 0.0, 0.3825)],
+            # Wurtzite: Zn and O on Wyckoff 2b (1/3, 2/3, z); (0, 0, z) stacks all atoms on one line.
+            basis=[(1 / 3, 2 / 3, 0.0), (1 / 3, 2 / 3, 0.3825)],
             spacegroup=186,
             cellpar=[3.249, 3.249, 5.206, 90.0, 90.0, 120.0],
         )
@@ -64,7 +65,8 @@ def build_slab(material: str):
     return slab
 
 
-def _top_atom_indices(slab, z_window: float = 1.5) -> list[int]:
+def _top_atom_indices(slab, z_window: float = 0.3) -> list[int]:
+    # Only the outermost plane: on ZnO(10-10) the next plane lies 0.94 A below the top.
     z_positions = slab.positions[:, 2]
     z_max = float(np.max(z_positions))
     return [idx for idx, z_val in enumerate(z_positions) if z_val > z_max - z_window]
@@ -75,7 +77,7 @@ def _nearest_metal_oxygen_pair(slab, metal_indices: list[int], oxygen_indices: l
     best_distance = float("inf")
     for m_idx in metal_indices:
         for o_idx in oxygen_indices:
-            distance = np.linalg.norm(slab.positions[m_idx, :2] - slab.positions[o_idx, :2])
+            distance = slab.get_distance(m_idx, o_idx, mic=True)
             if distance < best_distance:
                 best_distance = distance
                 best_pair = (m_idx, o_idx)
@@ -102,7 +104,8 @@ def select_adsorption_sites(slab, metal_symbol: str) -> dict[str, np.ndarray]:
 
     metal_site = slab.positions[metal_idx].copy()
     oxygen_site = slab.positions[oxygen_idx].copy()
-    bridge_site = 0.5 * (slab.positions[bridge_pair[0]] + slab.positions[bridge_pair[1]])
+    bridge_vector = slab.get_distance(bridge_pair[0], bridge_pair[1], mic=True, vector=True)
+    bridge_site = slab.positions[bridge_pair[0]] + 0.5 * bridge_vector
 
     metal_site[2] = z_surface
     oxygen_site[2] = z_surface
