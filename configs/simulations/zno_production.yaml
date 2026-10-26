@@ -63,8 +63,11 @@ methods:
     kpoints: [2, 3, 1]
 
   neb:
-    internal_images: 5
+    internal_images: 3
+    # Plain-NEB phase; the climbing-image phase always follows with fmax_ci.
     fmax_ev_per_angstrom: 0.08
+    fmax_ci_ev_per_angstrom: 0.05
+    # Total step budget; climb_start_fraction of it goes to the plain phase.
     max_steps: 300
     ecut_ev: 500.0
     kpoints: [2, 3, 1]
@@ -73,3 +76,8 @@ methods:
     climb: true
     climb_start_fraction: 0.30
     parallel_images: true
+    # Elementary hops only: on the 2x1 cell top_metal, bridge and top_oxygen are
+    # collinear along y, so top_metal -> top_oxygen would pass over bridge.
+    pairs:
+      - [top_metal, bridge]
+      - [bridge, top_oxygen]
