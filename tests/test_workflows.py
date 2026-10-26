@@ -18,13 +18,11 @@ from scripts.workflows import run_simulations as simulations
 
 ROOT = Path(__file__).resolve().parents[1]
 BASELINE = "4a2ff4a"
-# build_geometries.py and run_dft.py are deliberately excluded: the ZnO geometry
-# was corrected and BFGS convergence is now checked; see tests/test_geometry.py
-# and tests/test_dft_convergence.py. run_md.py is excluded too: the MD now uses the
-# DFT profile, physical Langevin friction, equilibration and seeds; see tests/test_md_run.py.
+# The simulation scripts corrected by the IC audit (build_geometries, run_dft, run_md,
+# run_neb, run_tddft) are deliberately excluded; their physics is covered by
+# tests/test_geometry.py, tests/test_dft_*.py, tests/test_md_run.py, tests/test_neb_*.py
+# and tests/test_tddft_run.py.
 SOURCES = {
-    "run_tddft.py": "scripts/simulations/tddft/run_tddft.py",
-    "run_neb.py": "scripts/simulations/neb/run_neb.py",
     "run_co2rr_pathways.py": "scripts/simulations/co2rr/run_co2rr_pathways.py",
     "classical_svm_baseline.py": "scripts/models/ml/classical_svm_baseline.py",
     "qsvm_baseline.py": "scripts/models/qml/qsvm_baseline.py",
