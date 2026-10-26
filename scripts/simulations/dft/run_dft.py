@@ -12,7 +12,7 @@ try:
 except ImportError as exc:
     raise SystemExit("NumPy is required. Install with: pip install numpy") from exc
 
-from scripts.common.project_config import ADSORPTION_SITES, DFT_RESULTS_DIR, GEOMETRY_DIR, MATERIALS, RESULTS_DIR, ensure_directories
+from scripts.common.project_config import ADSORPTION_SITES, DFT_SITES, DFT_RESULTS_DIR, GEOMETRY_DIR, MATERIALS, RESULTS_DIR, ensure_directories
 
 
 def _require_ase_and_gpaw() -> None:
@@ -54,7 +54,7 @@ def validate_inputs(materials: Iterable[str], sites: Iterable[str]) -> tuple[lis
     if unknown_materials:
         raise SystemExit(f"Unknown materials: {', '.join(unknown_materials)}")
 
-    unknown_sites = [name for name in sites if name not in ADSORPTION_SITES]
+    unknown_sites = [name for name in sites if name not in DFT_SITES]
     if unknown_sites:
         raise SystemExit(f"Unknown sites: {', '.join(unknown_sites)}")
 
@@ -364,7 +364,7 @@ def row_key(row: dict[str, float | str]) -> tuple[str, str]:
 
 def ordered_rows(rows_by_key: dict[tuple[str, str], dict[str, float | str]]) -> list[dict[str, float | str]]:
     material_order = {name: idx for idx, name in enumerate(MATERIALS.keys())}
-    site_order = {name: idx for idx, name in enumerate(ADSORPTION_SITES)}
+    site_order = {name: idx for idx, name in enumerate(DFT_SITES)}
     rows = list(rows_by_key.values())
     rows.sort(
         key=lambda row: (

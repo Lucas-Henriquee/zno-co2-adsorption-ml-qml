@@ -10,7 +10,15 @@ try:
 except ImportError as exc:
     raise SystemExit("NumPy is required. Install with: pip install numpy") from exc
 
-from scripts.common.project_config import ADSORPTION_SITES, CO2_SITE_HEIGHTS, GEOMETRY_DIR, MATERIALS, ensure_directories
+from scripts.common.project_config import (
+    CARBONATE_CO_BOND_ANGSTROM,
+    CARBONATE_OCO_ANGLE_DEG,
+    CO2_SITE_HEIGHTS,
+    DFT_SITES,
+    GEOMETRY_DIR,
+    MATERIALS,
+    ensure_directories,
+)
 
 
 def _require_ase() -> None:
@@ -115,11 +123,20 @@ def select_adsorption_sites(slab, metal_symbol: str) -> dict[str, np.ndarray]:
         "top_metal": metal_site,
         "top_oxygen": oxygen_site,
         "bridge": bridge_site,
+        "carbonate": oxygen_site.copy(),
     }
 
 
 def create_co2(site_name: str):
     from ase import Atoms
+
+    if site_name == "carbonate":
+        # Bent O-C-O in the xz plane (along the 6.50 A cell axis), C pointing down to the
+        # surface O and both O atoms above it, as in a monodentate carbonate.
+        half_angle = np.radians(CARBONATE_OCO_ANGLE_DEG / 2.0)
+        dx = CARBONATE_CO_BOND_ANGSTROM * np.sin(half_angle)
+        dz = CARBONATE_CO_BOND_ANGSTROM * np.cos(half_angle)
+        return Atoms("OCO", positions=[(-dx, 0.0, dz), (0.0, 0.0, 0.0), (dx, 0.0, dz)])
 
     co2 = Atoms("OCO", positions=[(-1.16, 0.0, 0.0), (0.0, 0.0, 0.0), (1.16, 0.0, 0.0)])
     if site_name == "top_oxygen":
@@ -170,7 +187,7 @@ def save_material_geometries(material: str) -> None:
         },
     }
 
-    for site_name in ADSORPTION_SITES:
+    for site_name in DFT_SITES:
         case_atoms = add_co2_to_site(slab, site_name, sites[site_name])
         case_traj_path = material_dir / f"co2_{site_name}.traj"
         case_cif_path = material_dir / f"co2_{site_name}.cif"

@@ -39,7 +39,7 @@ MODULES = {
     "neb": "scripts.simulations.neb.run_neb",
 }
 VALID_MATERIALS = {"ZnO", "TiO2", "CeO2"}
-VALID_SITES = {"top_metal", "top_oxygen", "bridge"}
+VALID_SITES = {"top_metal", "top_oxygen", "bridge", "carbonate"}  # carbonate: DFT only
 
 
 def parse_args() -> argparse.Namespace:

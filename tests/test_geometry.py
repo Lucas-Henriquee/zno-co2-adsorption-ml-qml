@@ -8,6 +8,7 @@ except ImportError:  # pragma: no cover
     neighbor_list = None
 
 if neighbor_list is not None:
+    from scripts.common.project_config import ADSORPTION_SITES
     from scripts.simulations.dft import build_geometries as geometry
 
 
@@ -39,7 +40,7 @@ class ZnOGeometryTests(unittest.TestCase):
     def test_co2_does_not_touch_its_periodic_copy(self):
         slab = geometry.build_slab("ZnO")
         sites = geometry.select_adsorption_sites(slab, "Zn")
-        for site in geometry.ADSORPTION_SITES:
+        for site in ADSORPTION_SITES:  # the carbonate start sits 1.70 A from O by design
             with self.subTest(site=site):
                 system = geometry.add_co2_to_site(slab, site, sites[site])
                 molecule = system.positions[len(slab):]
@@ -50,6 +51,28 @@ class ZnOGeometryTests(unittest.TestCase):
                 self.assertGreaterEqual(gap, 3.0)  # the 1x1 cell gave 0.93 A
                 distances = system.get_all_distances(mic=True)[len(slab):, :len(slab)]
                 self.assertGreaterEqual(distances.min(), 1.8)
+
+    def test_carbonate_start_is_bent_co2_above_a_surface_oxygen(self):
+        slab = geometry.build_slab("ZnO")
+        sites = geometry.select_adsorption_sites(slab, "Zn")
+        system = geometry.add_co2_to_site(slab, "carbonate", sites["carbonate"])
+        o1, c, o2 = len(slab), len(slab) + 1, len(slab) + 2
+        self.assertEqual(system.get_chemical_symbols()[-3:], ["O", "C", "O"])
+        self.assertAlmostEqual(system.get_angle(o1, c, o2), 130.0, places=6)
+        self.assertAlmostEqual(system.get_distance(c, o1), 1.25, places=6)
+        distances = system.get_all_distances(mic=True)[c, :len(slab)]
+        nearest = int(np.argmin(distances))
+        self.assertEqual(slab[nearest].symbol, "O")
+        self.assertAlmostEqual(distances[nearest], 1.70, places=6)
+        self.assertGreaterEqual(system.get_all_distances(mic=True)[[o1, o2], :len(slab)].min(), 1.8)
+
+    def test_carbonate_is_dft_only_and_not_a_default_site(self):
+        from scripts.common import project_config
+        from scripts.simulations.dft import run_dft
+
+        self.assertEqual(project_config.ADSORPTION_SITES, ("top_metal", "top_oxygen", "bridge"))
+        self.assertIn("carbonate", project_config.DFT_SITES)
+        self.assertEqual(run_dft.validate_inputs(["ZnO"], ["carbonate"]), (["ZnO"], ["carbonate"]))
 
 
 if __name__ == "__main__":

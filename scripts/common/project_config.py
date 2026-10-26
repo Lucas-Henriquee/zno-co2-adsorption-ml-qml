@@ -56,11 +56,22 @@ MATERIALS: dict[str, MaterialSpec] = {
 
 ADSORPTION_SITES: tuple[str, ...] = ("top_metal", "top_oxygen", "bridge")
 
+# DFT-only exploratory starts; not run by default and not used by TDDFT, CO2RR, MD or NEB.
+# "carbonate": bent CO2 with C above a surface O, a carbonate-like start that the three
+# linear starts above (2.2-3.7 A away) cannot reach by local relaxation.
+EXPLORATORY_SITES: tuple[str, ...] = ("carbonate",)
+DFT_SITES: tuple[str, ...] = ADSORPTION_SITES + EXPLORATORY_SITES
+
 CO2_SITE_HEIGHTS = {
     "top_metal": 2.20,  # Reference placement retained from the original workflow.
     "top_oxygen": 3.17,  # Updated from the earlier 2.40 Angstrom placement.
     "bridge": 3.67,  # Updated from the earlier 2.80 Angstrom placement.
+    "carbonate": 1.70,  # C above the surface O; between a C-O bond (~1.35 A) and contact.
 }
+
+# Bent CO2 for the carbonate start (O-C-O angle and C-O length of an activated CO2).
+CARBONATE_OCO_ANGLE_DEG = 130.0
+CARBONATE_CO_BOND_ANGSTROM = 1.25
 
 # Engineering-friendly screening targets for photocatalytic CO2 splitting.
 TARGET_ADSORPTION_ENERGY_EV = -0.70
