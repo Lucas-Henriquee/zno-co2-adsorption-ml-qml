@@ -2,11 +2,15 @@ schema_version: 1
 
 project:
   name: zno-current-analysis
-  description: Scientific and model analysis for the preserved ZnO results.
+  description: Scientific and model analysis of one simulation run and one model run.
 
 input:
-  scientific_results: results
-  model_run: results/models/zno_md3_local_v1
+  # Simulation run directory (results/simulations/<run-id>) and model run
+  # (results/models/<run-id>). Replace the run IDs or override them with
+  # --scientific-results and --model-run. The legacy results/ tree and
+  # results/models/zno_md3_local_v1 are invalid (wrong geometry, leaking dataset).
+  scientific_results: results/simulations/zno_production
+  model_run: results/models/zno_md_grouped_local
 
 output:
   root: results/analyses
@@ -15,6 +19,8 @@ execution:
   environment: qml-zno-modeling
 
 methods:
+  # Ranks successful DFT rows by adsorption energy; PBE gaps and isolated-CO2
+  # TDDFT values are reported for information only (no photocatalysis score).
   screening: {}
 
   co2_reduction:

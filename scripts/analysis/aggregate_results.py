@@ -6,6 +6,8 @@ from pathlib import Path
 
 import pandas as pd
 
+from scripts.common.project_config import RESULTS_DIR
+
 
 def load_metrics(base_dir: Path, model_type: str) -> list[dict]:
     rows = []
@@ -17,6 +19,17 @@ def load_metrics(base_dir: Path, model_type: str) -> list[dict]:
             continue
 
         data["model_type"] = model_type
+        # Flatten nested blocks written by the model scripts.
+        for prefix, key in [("", "test_metrics"), ("train_", "train_metrics")]:
+            for name, value in (data.get(key) or {}).items():
+                data.setdefault(f"{prefix}{name}", value)
+        diagnosis = data.get("fit_diagnosis") or {}
+        if isinstance(diagnosis, dict):
+            data.setdefault("train_test_gap", diagnosis.get("train_test_gap"))
+            data["fit_diagnosis"] = diagnosis.get("diagnosis")
+        grouping = data.pop("grouping", None) or {}
+        data["train_groups"] = grouping.get("train_groups")
+        data["test_groups"] = grouping.get("test_groups")
         data["run_dir"] = str(metrics_path.parent)
         rows.append(data)
 
@@ -25,9 +38,9 @@ def load_metrics(base_dir: Path, model_type: str) -> list[dict]:
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--svm-dir", type=Path, default=Path("results/svm"))
-    parser.add_argument("--qsvm-dir", type=Path, default=Path("results/qsvm"))
-    parser.add_argument("--output", type=Path, default=Path("results/comparison_table.csv"))
+    parser.add_argument("--svm-dir", type=Path, default=RESULTS_DIR / "svm")
+    parser.add_argument("--qsvm-dir", type=Path, default=RESULTS_DIR / "qsvm")
+    parser.add_argument("--output", type=Path, default=RESULTS_DIR / "comparison_table.csv")
     return parser.parse_args()
 
 
@@ -58,6 +71,9 @@ def main():
         "train_test_gap",
         "fit_diagnosis",
         "cv_balanced_accuracy_mean",
+        "split_strategy",
+        "train_groups",
+        "test_groups",
         "fit_time_s",
         "predict_time_s",
         "total_time_s",

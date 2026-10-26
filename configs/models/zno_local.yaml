@@ -5,8 +5,15 @@ project:
   description: Fair local SVM and QSVM comparison using unique MD windows.
 
 input:
-  dataset: data/generated/zno_existing_v1/multitech/md_window_unique_dataset.csv
+  # Grouped MD-window dataset of a dataset run: data/generated/<dataset-run-id>/...
+  # Override with --dataset. Every row must carry 'group' (material/site/seed);
+  # train/test and CV keep each trajectory on one side. The legacy
+  # zno_existing_v1 dataset has no group column and is rejected.
+  dataset: data/generated/zno_production_datasets/multitech/md_window_unique_dataset.csv
   label: label_site_id
+  # Independent-trajectory column. Documentation only: run_benchmarks.py uses
+  # --group-column, whose default is "group".
+  group_column: group
 
 output:
   root: results/models
@@ -17,9 +24,13 @@ execution:
   fail_fast: true
 
 split:
+  # Grouped holdout: round(test_size x trajectories) of each site go to test, at
+  # least one. Needs >= 2 trajectories (seeds) per site, >= 3 if CV is enabled;
+  # otherwise the run stops with an explanation instead of splitting windows.
   seeds: [42]
   test_size: 0.30
-  max_samples: 30
+  # 0 = every window; a limit is spread over as many trajectories as possible.
+  max_samples: 0
 
 common:
   feature_sets: [md3]
@@ -31,6 +42,8 @@ svm:
   scalers: [power]
   gamma: scale
   degree: 3
+  # Grouped CV folds (StratifiedGroupKFold) on the training trajectories;
+  # reduced to the training trajectories per site, 0 disables.
   cv_folds: 5
 
 qsvm:

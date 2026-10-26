@@ -3,8 +3,8 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import math
 import platform
+import sys
 import time
 import uuid
 from datetime import datetime
@@ -13,11 +13,6 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from qiskit import QuantumCircuit
-from qiskit.circuit import ParameterVector
-from qiskit.circuit.library import zz_feature_map
-from qiskit.transpiler.preset_passmanagers import generate_preset_pass_manager
-from qiskit_ibm_runtime import QiskitRuntimeService, SamplerV2
 from sklearn.metrics import (
     accuracy_score,
     balanced_accuracy_score,
@@ -27,56 +22,45 @@ from sklearn.metrics import (
     precision_score,
     recall_score,
 )
-from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import MinMaxScaler, PowerTransformer, StandardScaler
 from sklearn.svm import SVC
 
+# qiskit and qiskit-ibm-runtime are imported lazily inside the functions that
+# build circuits or contact IBM, so data loading and splitting work without them.
+try:
+    from scripts.common.project_config import RESULTS_DIR
+    from scripts.models.grouped_split import (
+        DEFAULT_GROUP_COLUMN,
+        group_summary,
+        grouped_train_test_split,
+        load_grouped_dataset,
+        split_table,
+    )
+except ModuleNotFoundError:  # executed as a file from outside the project root
+    sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+    from scripts.common.project_config import RESULTS_DIR
+    from scripts.models.grouped_split import (
+        DEFAULT_GROUP_COLUMN,
+        group_summary,
+        grouped_train_test_split,
+        load_grouped_dataset,
+        split_table,
+    )
 
+
+# Only per-window MD descriptors; see classical_svm_baseline.py for why the
+# former cartesian-product feature sets were removed (D1).
 FEATURE_SETS = {
-    "all12": [
-        "feature_tddft_transition_energy_ev",
-        "feature_tddft_transition_oscillator_strength",
-        "feature_tddft_transition_delta_from_peak_ev",
-        "feature_dft_adsorption_energy_ev",
-        "feature_dft_c_surface_distance_a",
-        "feature_dft_gap_change_ev",
-        "feature_co2rr_deltaG_CO2_to_COOH_ev",
-        "feature_co2rr_deltaG_COOH_to_CO_ev",
-        "feature_co2rr_limiting_potential_v",
-        "feature_md_window_c_surface_distance_mean_a",
-        "feature_md_window_c_surface_distance_std_a",
-        "feature_md_window_mean_oco_angle_deg",
-    ],
-    "static6": [
-        "feature_dft_adsorption_energy_ev",
-        "feature_dft_c_surface_distance_a",
-        "feature_dft_gap_change_ev",
-        "feature_co2rr_deltaG_CO2_to_COOH_ev",
-        "feature_co2rr_deltaG_COOH_to_CO_ev",
-        "feature_co2rr_limiting_potential_v",
-    ],
-    "dynamic6": [
-        "feature_tddft_transition_energy_ev",
-        "feature_tddft_transition_oscillator_strength",
-        "feature_tddft_transition_delta_from_peak_ev",
-        "feature_md_window_c_surface_distance_mean_a",
-        "feature_md_window_c_surface_distance_std_a",
-        "feature_md_window_mean_oco_angle_deg",
-    ],
-    "dynamic4": [
-        "feature_tddft_transition_energy_ev",
-        "feature_tddft_transition_oscillator_strength",
-        "feature_md_window_c_surface_distance_mean_a",
-        "feature_md_window_c_surface_distance_std_a",
-    ],
-    "tddft3": [
-        "feature_tddft_transition_energy_ev",
-        "feature_tddft_transition_oscillator_strength",
-        "feature_tddft_transition_delta_from_peak_ev",
-    ],
     "md3": [
         "feature_md_window_c_surface_distance_mean_a",
         "feature_md_window_c_surface_distance_std_a",
+        "feature_md_window_mean_oco_angle_deg",
+    ],
+    "md_mic5": [
+        "feature_md_window_c_min_slab_distance_mean_a",
+        "feature_md_window_o_min_metal_distance_mean_a",
+        "feature_md_window_c_surface_distance_mean_a",
+        "feature_md_window_co_bond_avg_mean_a",
         "feature_md_window_mean_oco_angle_deg",
     ],
 }
@@ -87,13 +71,18 @@ ENTANGLEMENTS = ["linear", "circular", "full"]
 
 def parse_args():
     parser = argparse.ArgumentParser(description="General quantum-kernel SVM benchmark on real IBM Quantum hardware.")
-    parser.add_argument("--csv", type=Path, default=Path("results/datasets/multitech_expanded_ml_dataset_clean.csv"))
+    parser.add_argument("--csv", type=Path, default=RESULTS_DIR / "datasets" / "md_window_unique_dataset.csv")
     parser.add_argument("--label", default="label_site_id")
+    parser.add_argument(
+        "--group-column",
+        default=DEFAULT_GROUP_COLUMN,
+        help="Column with the independent-trajectory id; train/test never split a group.",
+    )
     parser.add_argument("--feature-set", default="md3", choices=sorted(FEATURE_SETS))
     parser.add_argument("--features", nargs="+", default=None)
     parser.add_argument("--max-samples", type=int, default=12)
     parser.add_argument("--test-size", type=float, default=0.25)
-    parser.add_argument("--split-file", type=Path, default=None)
+    parser.add_argument("--split-file", type=Path, default=None, help="Optional CSV with row_id and split=train/test; must not share groups.")
     parser.add_argument("--scaler", default="power_minmax", choices=SCALERS)
 
     parser.add_argument("--n-qubits", type=int, default=0)
@@ -116,7 +105,7 @@ def parse_args():
     parser.add_argument("--classical-gamma", default="scale")
     parser.add_argument("--skip-classical-baseline", action="store_true")
 
-    parser.add_argument("--output-dir", type=Path, default=Path("results/qsvm_hardware"))
+    parser.add_argument("--output-dir", type=Path, default=RESULTS_DIR / "qsvm_hardware")
     parser.add_argument("--run-name", default=None)
     parser.add_argument("--random-state", type=int, default=42)
     parser.add_argument("--trial", type=int, default=1, help="Hardware repetition index")
@@ -156,6 +145,8 @@ def create_runtime_service(
 
     if instance:
         service_kwargs["instance"] = instance
+
+    from qiskit_ibm_runtime import QiskitRuntimeService
 
     return QiskitRuntimeService(**service_kwargs)    
 
@@ -215,85 +206,20 @@ def metric_bundle(y_true, y_pred) -> dict:
     }
 
 
-def balanced_subsample(df: pd.DataFrame, label: str, max_samples: int, random_state: int) -> pd.DataFrame:
-    if max_samples <= 0 or len(df) <= max_samples:
-        return df.sample(frac=1.0, random_state=random_state).reset_index(drop=True)
-    classes = list(df[label].drop_duplicates())
-    n_classes = len(classes)
-    if max_samples < 2 * n_classes:
-        raise ValueError(f"--max-samples must be at least {2 * n_classes} for {n_classes} classes.")
-    base, remainder = divmod(max_samples, n_classes)
-    rng = np.random.default_rng(random_state)
-    class_order = list(classes)
-    rng.shuffle(class_order)
-    chunks, selected = [], set()
-    for i, cls in enumerate(class_order):
-        target = base + (1 if i < remainder else 0)
-        group = df[df[label] == cls]
-        part = group.sample(n=min(target, len(group)), random_state=random_state + i)
-        chunks.append(part)
-        selected.update(part.index.tolist())
-    sampled = pd.concat(chunks, axis=0)
-    remaining = max_samples - len(sampled)
-    if remaining > 0:
-        rest = df.drop(index=list(selected), errors="ignore")
-        if len(rest):
-            sampled = pd.concat([sampled, rest.sample(n=min(remaining, len(rest)), random_state=random_state + 10_000)])
-    return sampled.sample(frac=1.0, random_state=random_state).reset_index(drop=True)
-
-
 def load_base_data(args, features: list[str]) -> pd.DataFrame:
-    df = pd.read_csv(args.csv)
-    df["_row_id"] = np.arange(len(df), dtype=int)
-    required = features + [args.label]
-    missing = [c for c in required if c not in df.columns]
-    if missing:
-        raise ValueError(f"Missing columns: {missing}")
-    df = df.dropna(subset=required).copy()
-    if df.empty or df[args.label].nunique() < 2:
-        raise ValueError("Dataset must contain at least two classes after dropna.")
-    return df
+    return load_grouped_dataset(args.csv, features, args.label, args.group_column)
 
 
 def split_data(args, df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
-    if args.split_file is not None:
-        split = pd.read_csv(args.split_file)
-        if not {"row_id", "split"}.issubset(split.columns):
-            raise ValueError("split-file must contain columns: row_id, split")
-        if split["row_id"].duplicated().any():
-            raise ValueError("split-file contains duplicated row_id values")
-        invalid_splits = sorted(set(split["split"]) - {"train", "test"})
-        if invalid_splits:
-            raise ValueError(f"split-file contains invalid split values: {invalid_splits}")
-        train_ids = split.loc[split["split"] == "train", "row_id"].astype(int).tolist()
-        test_ids = split.loc[split["split"] == "test", "row_id"].astype(int).tolist()
-        if not train_ids or not test_ids:
-            raise ValueError("split-file must contain at least one train and one test row")
-        indexed = df.set_index("_row_id", drop=False)
-        missing_ids = sorted((set(train_ids) | set(test_ids)) - set(indexed.index))
-        if missing_ids:
-            raise ValueError(f"Split contains row_ids unavailable after dropna: {missing_ids[:10]}")
-        if "true_label" in split.columns:
-            expected = split.set_index("row_id")["true_label"]
-            actual = indexed.loc[expected.index, args.label]
-            mismatched = expected.index[expected.astype(str) != actual.astype(str)]
-            if len(mismatched):
-                raise ValueError(
-                    "split-file true_label does not match the dataset for row_ids: "
-                    f"{mismatched[:10].tolist()}"
-                )
-        return indexed.loc[train_ids].copy(), indexed.loc[test_ids].copy()
-
-    sampled = balanced_subsample(df, args.label, args.max_samples, args.random_state)
-    counts = sampled[args.label].value_counts()
-    if counts.min() < 2:
-        raise ValueError("Each class needs at least two samples.")
-    n_classes = sampled[args.label].nunique()
-    n_test = math.ceil(len(sampled) * args.test_size)
-    if n_test < n_classes or len(sampled) - n_test < n_classes:
-        raise ValueError("Split too small for stratification. Increase --max-samples or --test-size.")
-    train_df, test_df = train_test_split(sampled, test_size=args.test_size, random_state=args.random_state, stratify=sampled[args.label])
-    return train_df.copy(), test_df.copy()
+    return grouped_train_test_split(
+        df,
+        args.label,
+        args.group_column,
+        args.test_size,
+        args.max_samples,
+        args.random_state,
+        args.split_file,
+    )
 
 
 def fit_transform_scaler(X_train, X_test, scaler_name: str):
@@ -351,6 +277,9 @@ def entanglement_pairs(n_qubits: int, entanglement: str) -> list[tuple[int, int]
 
 
 def build_multiqubit_feature_map(n_features: int, n_qubits: int, reps: int, entanglement: str) -> QuantumCircuit:
+    from qiskit import QuantumCircuit
+    from qiskit.circuit import ParameterVector
+
     if n_qubits < n_features:
         raise ValueError("n_qubits must be >= n_features")
     x = ParameterVector("x", n_features)
@@ -375,6 +304,8 @@ def build_multiqubit_feature_map(n_features: int, n_qubits: int, reps: int, enta
 
 
 def build_feature_map(n_features: int, requested_qubits: int, reps: int, entanglement: str):
+    from qiskit.circuit.library import zz_feature_map
+
     n_qubits = n_features if requested_qubits == 0 else requested_qubits
     if n_qubits < n_features:
         raise ValueError(f"n_qubits={n_qubits} cannot be smaller than n_features={n_features}")
@@ -682,6 +613,9 @@ def build_hardware_executor(
     run_tag: str,
     transpiler_seed: int,
 ):
+    from qiskit.transpiler.preset_passmanagers import generate_preset_pass_manager
+    from qiskit_ibm_runtime import SamplerV2
+
     sampler = SamplerV2(mode=backend, options={"default_shots": shots, "environment": {"job_tags": [run_tag]}})
     pass_manager = generate_preset_pass_manager(
         optimization_level=optimization_level,
@@ -755,15 +689,16 @@ def main():
 
     run_dir = make_run_dir(args, feature_set_name, n_qubits)
     (run_dir / "feature_map.txt").write_text(str(feature_map.draw(output="text", fold=-1)) + "\n", encoding="utf-8")
-    pd.concat([
-        pd.DataFrame({"row_id": train_df["_row_id"].astype(int), "split": "train", "true_label": train_df[args.label].to_numpy()}),
-        pd.DataFrame({"row_id": test_df["_row_id"].astype(int), "split": "test", "true_label": test_df[args.label].to_numpy()}),
-    ], ignore_index=True).to_csv(run_dir / "split.csv", index=False)
+    split_table(train_df, test_df, args.label, args.group_column).to_csv(run_dir / "split.csv", index=False)
 
     workload = estimate_kernel_entries(len(train_df), len(test_df))
     print("\nDATA / FEATURE MAP")
     print(f"Feature set: {feature_set_name} ({len(features)} features)")
     print(f"Samples: {len(selected_df)} | train={len(train_df)} | test={len(test_df)}")
+    print(
+        f"Groups ({args.group_column}): train={train_df[args.group_column].nunique()} "
+        f"| test={test_df[args.group_column].nunique()}"
+    )
     print(f"Scaler: {args.scaler}")
     print(f"Encoding: {encoding_name} | qubits={n_qubits} | reps={args.reps} | entanglement={args.entanglement}")
     print(f"Feature-map depth pre-transpile: {feature_map.depth()} | size={feature_map.size()}")
@@ -810,6 +745,8 @@ def main():
             "random_state": args.random_state,
             "split_file": None if args.split_file is None else str(args.split_file),
             "split_sha256": file_sha256(args.split_file),
+            "split_strategy": "grouped",
+            "grouping": group_summary(train_df, test_df, args.label, args.group_column),
             "optimization_level": args.optimization_level,
             "transpiler_seed": args.transpiler_seed,
             "max_circuits_per_job": args.max_circuits_per_job,
@@ -938,6 +875,8 @@ def main():
         "max_samples": args.max_samples,
         "split_file": None if args.split_file is None else str(args.split_file),
         "split_sha256": file_sha256(args.split_file),
+        "split_strategy": "grouped",
+        "grouping": group_summary(train_df, test_df, args.label, args.group_column),
         "feature_map_depth_pretranspile": feature_map.depth(),
         "feature_map_size_pretranspile": feature_map.size(),
         "transpiled_circuit_stats": {"K_train": train_circuit_stats, "K_test": test_circuit_stats},

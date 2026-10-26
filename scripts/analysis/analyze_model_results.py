@@ -17,6 +17,9 @@ COMPARISON_COLUMNS = [
     "samples",
     "train_samples",
     "test_samples",
+    "split_strategy",
+    "train_groups",
+    "test_groups",
     "test_accuracy",
     "test_balanced_accuracy",
     "test_f1_macro",
@@ -63,6 +66,16 @@ def split_status(table: pd.DataFrame) -> str:
     return "yes" if hashes.nunique() == 1 else "no"
 
 
+def grouped_status(table: pd.DataFrame) -> str:
+    """'yes' only if every run recorded a grouped (trajectory-wise) split."""
+    if table.empty or "split_strategy" not in table:
+        return "unknown"
+    strategies = table["split_strategy"].fillna("").astype(str).str.strip()
+    if strategies.eq("").any():
+        return "unknown"
+    return "yes" if strategies.eq("grouped").all() else "no"
+
+
 def validate_metrics(table: pd.DataFrame) -> None:
     for column in ("test_accuracy", "test_balanced_accuracy", "test_f1_macro", "train_balanced_accuracy"):
         values = pd.to_numeric(table[column], errors="coerce")
@@ -85,13 +98,19 @@ def validate_metrics(table: pd.DataFrame) -> None:
 def write_report(table: pd.DataFrame, output: Path, excluded_runs: int = 0) -> None:
     shared_split = split_status(table)
     sample_counts = ", ".join(str(int(value)) for value in sorted(table["samples"].unique()))
+    test_groups = ""
+    if "test_groups" in table:
+        values = pd.to_numeric(table["test_groups"], errors="coerce").dropna().unique()
+        test_groups = ", ".join(str(int(value)) for value in sorted(values))
     lines = [
         "# Model Comparison Report",
         "",
         f"- Completed model runs: {len(table)}",
         f"- Excluded unsuccessful runs: {excluded_runs}",
         f"- Shared train/test split: {shared_split}",
+        f"- Grouped split (no MD trajectory in both train and test): {grouped_status(table)}",
         f"- Dataset sample counts across runs: {sample_counts}",
+        f"- Independent test trajectories (groups) across runs: {test_groups or 'unavailable'}",
         "",
         "## Results",
         "",

@@ -253,13 +253,25 @@ def figure_activation_scatter(rows: list[dict[str, str]], plt, Normalize, ticker
     save_figure(fig, "fig02_activation_scatter", plt)
 
 
+def co2_onset(row: dict[str, str]) -> float:
+    """TDDFT onset of the isolated CO2 molecule (co2_isolated_onset_ev).
+
+    The legacy name tddft_onset_ev is read only as a fallback. This is not an
+    absorption onset of the ZnO/CO2 system.
+    """
+    value = row.get("co2_isolated_onset_ev")
+    if value in (None, ""):
+        value = row.get("tddft_onset_ev")
+    return safe_float(value)
+
+
 def figure_photo_thermo_map(rows: list[dict[str, str]], plt, Line2D) -> None:
     filtered: list[dict[str, str]] = []
     for row in rows:
         if row.get("quality_flag", "") != "ok":
             continue
         ads = safe_float(row.get("adsorption_energy_ev"))
-        onset = safe_float(row.get("tddft_onset_ev"))
+        onset = co2_onset(row)
         if math.isfinite(ads) and math.isfinite(onset):
             filtered.append(row)
 
@@ -270,7 +282,7 @@ def figure_photo_thermo_map(rows: list[dict[str, str]], plt, Line2D) -> None:
     sites = ordered_unique([row["site"] for row in filtered], SITE_ORDER)
 
     ads_values = [safe_float(row["adsorption_energy_ev"]) for row in filtered]
-    onset_values = [safe_float(row["tddft_onset_ev"]) for row in filtered]
+    onset_values = [co2_onset(row) for row in filtered]
     x_min, x_max = min(ads_values), max(ads_values)
     y_min, y_max = min(onset_values), max(onset_values)
     x_pad = max(0.04, 0.10 * (x_max - x_min if x_max > x_min else 1.0))
@@ -287,7 +299,7 @@ def figure_photo_thermo_map(rows: list[dict[str, str]], plt, Line2D) -> None:
             continue
         ax.plot(
             [safe_float(row["adsorption_energy_ev"]) for row in material_rows],
-            [safe_float(row["tddft_onset_ev"]) for row in material_rows],
+            [co2_onset(row) for row in material_rows],
             color=MATERIAL_COLORS.get(material, "#666666"),
             linewidth=1.0,
             linestyle=":",
@@ -299,7 +311,7 @@ def figure_photo_thermo_map(rows: list[dict[str, str]], plt, Line2D) -> None:
         material = row["material"]
         site = row["site"]
         x_val = safe_float(row["adsorption_energy_ev"])
-        y_val = safe_float(row["tddft_onset_ev"])
+        y_val = co2_onset(row)
         color = MATERIAL_COLORS.get(material, "#666666")
         marker = SITE_MARKERS.get(site, "o")
 
@@ -318,13 +330,13 @@ def figure_photo_thermo_map(rows: list[dict[str, str]], plt, Line2D) -> None:
     ax.set_xlim(x_min - x_pad, x_max + x_pad)
     ax.set_ylim(y_min - y_pad, y_max + y_pad)
     ax.set_xlabel("Adsorption energy, E_ads (eV)")
-    ax.set_ylabel("TDDFT onset energy (eV)")
-    ax.set_title("Thermodynamic-Optical Tradeoff Map")
+    ax.set_ylabel("Isolated-CO2 TDDFT onset (eV)")
+    ax.set_title("Adsorption Energy vs Isolated-CO2 TDDFT Onset")
     ax.grid(linestyle="--", linewidth=0.5, alpha=0.32)
     ax.text(
         0.014,
         0.97,
-        "Better performance trends toward lower-left",
+        "Onset of the isolated CO2 molecule, not of the ZnO/CO2 system",
         transform=ax.transAxes,
         ha="left",
         va="top",

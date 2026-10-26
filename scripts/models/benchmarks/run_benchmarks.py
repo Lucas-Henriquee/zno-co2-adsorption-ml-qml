@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import itertools
 import json
-import math
 import os
 import queue
 import shlex
@@ -17,38 +16,36 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from sklearn.model_selection import train_test_split
+
+try:
+    from scripts.common.project_config import RESULTS_DIR
+    from scripts.models.grouped_split import (
+        DEFAULT_GROUP_COLUMN,
+        grouped_train_test_split,
+        load_grouped_dataset,
+        split_table,
+    )
+except ModuleNotFoundError:  # executed as a file from outside the project root
+    sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+    from scripts.common.project_config import RESULTS_DIR
+    from scripts.models.grouped_split import (
+        DEFAULT_GROUP_COLUMN,
+        grouped_train_test_split,
+        load_grouped_dataset,
+        split_table,
+    )
 
 
+# Only per-window MD descriptors; see classical_svm_baseline.py for why the
+# former cartesian-product feature sets were removed (D1).
 FEATURE_SETS = {
-    "all12": [
-        "feature_tddft_transition_energy_ev", "feature_tddft_transition_oscillator_strength",
-        "feature_tddft_transition_delta_from_peak_ev", "feature_dft_adsorption_energy_ev",
-        "feature_dft_c_surface_distance_a", "feature_dft_gap_change_ev",
-        "feature_co2rr_deltaG_CO2_to_COOH_ev", "feature_co2rr_deltaG_COOH_to_CO_ev",
-        "feature_co2rr_limiting_potential_v", "feature_md_window_c_surface_distance_mean_a",
-        "feature_md_window_c_surface_distance_std_a", "feature_md_window_mean_oco_angle_deg",
-    ],
-    "static6": [
-        "feature_dft_adsorption_energy_ev", "feature_dft_c_surface_distance_a", "feature_dft_gap_change_ev",
-        "feature_co2rr_deltaG_CO2_to_COOH_ev", "feature_co2rr_deltaG_COOH_to_CO_ev",
-        "feature_co2rr_limiting_potential_v",
-    ],
-    "dynamic6": [
-        "feature_tddft_transition_energy_ev", "feature_tddft_transition_oscillator_strength",
-        "feature_tddft_transition_delta_from_peak_ev", "feature_md_window_c_surface_distance_mean_a",
-        "feature_md_window_c_surface_distance_std_a", "feature_md_window_mean_oco_angle_deg",
-    ],
-    "dynamic4": [
-        "feature_tddft_transition_energy_ev", "feature_tddft_transition_oscillator_strength",
-        "feature_md_window_c_surface_distance_mean_a", "feature_md_window_c_surface_distance_std_a",
-    ],
-    "tddft3": [
-        "feature_tddft_transition_energy_ev", "feature_tddft_transition_oscillator_strength",
-        "feature_tddft_transition_delta_from_peak_ev",
-    ],
     "md3": [
         "feature_md_window_c_surface_distance_mean_a", "feature_md_window_c_surface_distance_std_a",
+        "feature_md_window_mean_oco_angle_deg",
+    ],
+    "md_mic5": [
+        "feature_md_window_c_min_slab_distance_mean_a", "feature_md_window_o_min_metal_distance_mean_a",
+        "feature_md_window_c_surface_distance_mean_a", "feature_md_window_co_bond_avg_mean_a",
         "feature_md_window_mean_oco_angle_deg",
     ],
 }
@@ -62,13 +59,18 @@ def parse_args():
     p = argparse.ArgumentParser(description=("Orchestrate classical SVM, ideal QSVM, and IBM-hardware QSVM benchmarks."))
 
     p.add_argument("--models", nargs="+", default=["all"], choices=["all", "svm", "qsvm", "qsvm_ibm"])
-    p.add_argument("--csv", type=Path, default=Path("results/datasets/multitech_expanded_ml_dataset_clean.csv"))
+    p.add_argument("--csv", type=Path, default=RESULTS_DIR / "datasets" / "md_window_unique_dataset.csv")
     p.add_argument("--label", default="label_site_id")
+    p.add_argument(
+        "--group-column",
+        default=DEFAULT_GROUP_COLUMN,
+        help="Independent-trajectory id; the shared split and every CV keep each group on one side.",
+    )
     p.add_argument("--feature-sets", nargs="+", default=["md3"], choices=sorted(FEATURE_SETS))
     p.add_argument("--ibm-feature-sets", nargs="+", default=["md3"], choices=sorted(FEATURE_SETS))
     p.add_argument("--seeds", nargs="+", type=int, default=[42])
     p.add_argument("--test-size", type=float, default=0.25)
-    p.add_argument("--max-samples", type=int, default=12, help="Shared sample limit, ensuring comparable splits. 0 = full data.")
+    p.add_argument("--max-samples", type=int, default=12, help="Shared sample limit, spread over as many groups as possible. 0 = full data.")
 
     p.add_argument("--svm-kernels", nargs="+", default=["rbf"], choices=ALL_SVM_KERNELS)
     p.add_argument("--svm-scalers", nargs="+", default=["power"], choices=ALL_SCALERS)
@@ -110,7 +112,7 @@ def parse_args():
     p.add_argument("--timeout", type=float, default=300.0, help="Per-run timeout in seconds for SVM/QSVM local runs. 0 disables it.",)
     p.add_argument("--hardware-timeout", type=float, default=0.0, help=("Timeout for a REAL IBM hardware client process. 0 disables it recommended because killing the client does not necessarily cancel an already submitted Runtime job."),)
     p.add_argument("--fail-fast", action="store_true")
-    p.add_argument("--output-root", type=Path, default=Path("results/benchmarks"))
+    p.add_argument("--output-root", type=Path, default=RESULTS_DIR / "benchmarks")
     return p.parse_args()
 
 
@@ -118,49 +120,25 @@ def selected_models(raw: list[str]) -> list[str]:
     return ["svm", "qsvm", "qsvm_ibm"] if "all" in raw else list(dict.fromkeys(raw))
 
 
-def balanced_subsample(df: pd.DataFrame, label: str, max_samples: int, seed: int) -> pd.DataFrame:
-    if max_samples <= 0 or len(df) <= max_samples:
-        return df.sample(frac=1.0, random_state=seed).reset_index(drop=True)
-    classes = list(df[label].drop_duplicates())
-    n_classes = len(classes)
-    if max_samples < 2 * n_classes:
-        raise ValueError(f"max_samples={max_samples} is too small for {n_classes} classes")
-    base, remainder = divmod(max_samples, n_classes)
-    rng = np.random.default_rng(seed)
-    order = list(classes); rng.shuffle(order)
-    chunks, selected = [], set()
-    for i, cls in enumerate(order):
-        target = base + (1 if i < remainder else 0)
-        group = df[df[label] == cls]
-        part = group.sample(n=min(target, len(group)), random_state=seed + i)
-        chunks.append(part); selected.update(part.index.tolist())
-    sampled = pd.concat(chunks, axis=0)
-    remaining = max_samples - len(sampled)
-    if remaining > 0:
-        rest = df.drop(index=list(selected), errors="ignore")
-        if len(rest):
-            sampled = pd.concat([sampled, rest.sample(n=min(remaining, len(rest)), random_state=seed + 10_000)])
-    return sampled.sample(frac=1.0, random_state=seed).reset_index(drop=True)
+def create_split(
+    csv_path: Path,
+    label: str,
+    feature_set: str,
+    max_samples: int,
+    test_size: float,
+    seed: int,
+    split_dir: Path,
+    group_column: str = DEFAULT_GROUP_COLUMN,
+) -> Path:
+    """Write one grouped train/test split shared by SVM, QSVM and IBM runs.
 
-
-def create_split(csv_path: Path, label: str, feature_set: str, max_samples: int, test_size: float, seed: int, split_dir: Path) -> Path:
+    Whole trajectories (groups) go to either train or test. Too few groups per
+    class raises InsufficientGroupsError with the number of trajectories needed.
+    """
     features = FEATURE_SETS[feature_set]
-    df = pd.read_csv(csv_path)
-    df["_row_id"] = np.arange(len(df), dtype=int)
-    missing = [c for c in features + [label] if c not in df.columns]
-    if missing:
-        raise ValueError(f"Missing columns for {feature_set}: {missing}")
-    df = df.dropna(subset=features + [label]).copy()
-    sampled = balanced_subsample(df, label, max_samples, seed)
-    n_classes = sampled[label].nunique()
-    n_test = math.ceil(len(sampled) * test_size)
-    if n_test < n_classes or len(sampled) - n_test < n_classes:
-        raise ValueError(f"Split too small for {feature_set}: samples={len(sampled)}, classes={n_classes}")
-    train_df, test_df = train_test_split(sampled, test_size=test_size, random_state=seed, stratify=sampled[label])
-    split = pd.concat([
-        pd.DataFrame({"row_id": train_df["_row_id"].astype(int), "split": "train", "true_label": train_df[label].to_numpy()}),
-        pd.DataFrame({"row_id": test_df["_row_id"].astype(int), "split": "test", "true_label": test_df[label].to_numpy()}),
-    ], ignore_index=True)
+    df = load_grouped_dataset(csv_path, features, label, group_column)
+    train_df, test_df = grouped_train_test_split(df, label, group_column, test_size, max_samples, seed)
+    split = split_table(train_df, test_df, label, group_column)
     split_dir.mkdir(parents=True, exist_ok=True)
     size_tag = "all" if max_samples <= 0 else str(max_samples)
     path = split_dir / f"split_{feature_set}_n{size_tag}_test{test_size:g}_seed{seed}.csv"
@@ -351,6 +329,9 @@ def summarize_result(
         "samples": m.get("samples"),
         "train_samples": m.get("train_samples"),
         "test_samples": m.get("test_samples"),
+        "split_strategy": m.get("split_strategy"),
+        "train_groups": safe_get(m, "grouping", "train_groups"),
+        "test_groups": safe_get(m, "grouping", "test_groups"),
         "train_balanced_accuracy": safe_get(m, "train_metrics", "balanced_accuracy"),
         "test_accuracy": safe_get(m, "test_metrics", "accuracy"),
         "test_balanced_accuracy": safe_get(m, "test_metrics", "balanced_accuracy"),
@@ -677,7 +658,12 @@ def main():
     def split_for(feature_set: str, seed: int) -> Path:
         key = (feature_set, seed)
         if key not in split_cache:
-            split_cache[key] = create_split(args.csv, args.label, feature_set, args.max_samples, args.test_size, seed, split_dir)
+            try:
+                split_cache[key] = create_split(
+                    args.csv, args.label, feature_set, args.max_samples, args.test_size, seed, split_dir, args.group_column
+                )
+            except ValueError as exc:
+                raise SystemExit(f"[error] Cannot build a grouped split for {feature_set}: {exc}") from exc
         return split_cache[key]
 
     commands: list[tuple[str, list[str]]] = []
@@ -690,6 +676,7 @@ def main():
             run_name = f"svm_{fs}_{kernel}_{scaler}_seed{seed}"
             commands.append(("svm", [
                 py, str(scripts["svm"]), "--csv", str(args.csv), "--label", args.label,
+                "--group-column", args.group_column,
                 "--feature-set", fs, "--kernel", kernel, "--scaler", scaler, "--C", str(args.C),
                 "--gamma", str(args.svm_gamma), "--degree", str(args.svm_degree),
                 "--class-weight", args.class_weight, "--cv", str(args.svm_cv), "--split-file", str(split),
@@ -724,6 +711,7 @@ def main():
                 str(scripts["qsvm"]),
                 "--csv", str(args.csv),
                 "--label", args.label,
+                "--group-column", args.group_column,
                 "--feature-set", fs,
                 "--scaler", scaler,
                 "--entanglement", ent,
@@ -783,6 +771,7 @@ def main():
                 str(scripts["qsvm_ibm"]),
                 "--csv", str(args.csv),
                 "--label", args.label,
+                "--group-column", args.group_column,
                 "--feature-set", fs,
                 "--scaler", scaler,
                 "--entanglement", ent,
@@ -890,6 +879,9 @@ def main():
             "test_f1_macro",
             "train_balanced_accuracy",
             "train_test_gap",
+            "split_strategy",
+            "train_groups",
+            "test_groups",
             "preprocessing_time_s",
             "kernel_time_s",
             "training_time_s",
