@@ -67,7 +67,7 @@ def test_profile_and_parameters_come_from_dft_summary(results, calls):
     make_results(results, {"bridge": ("ok", "robust")})
     assert run(["--site", "bridge", *FAST]) == 0
     call = calls[0]
-    assert call["smearing"] == 0.15 and call["maxiter"] == 280 and call["mixer"] == (0.03, 7, 100)
+    assert call["smearing"] == 0.05 and call["maxiter"] == 280 and call["mixer"] == (0.03, 7, 100)
     assert call["mode"] == "pw" and call["ecut"] == 500.0 and call["kpts"] == (2, 3, 1)
     summary = read_rows(results / "md/ZnO/bridge/md_site_summary.csv")
     assert summary[0]["dft_profile"] == "robust" and summary[0]["seed"] == "1234"

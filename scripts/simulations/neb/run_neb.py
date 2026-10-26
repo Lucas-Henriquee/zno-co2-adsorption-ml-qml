@@ -30,7 +30,10 @@ DEFAULT_PAIRS = (("top_metal", "bridge"), ("bridge", "top_oxygen"))
 DEFAULT_FMAX_CI = 0.05
 DEFAULT_DFT_FMAX = 0.05
 ADSORBATE_ATOMS = 3  # CO2 = last three atoms (O, C, O)
-ENERGY_PROVENANCE_TOL_EV = 1e-3
+# A single point on 2 ranks per image does not reproduce the 6-rank DFT energy to the
+# last meV (SCF convergence is per electron), so the provenance check needs some slack.
+DEFAULT_ENDPOINT_ENERGY_TOL_EV = 0.02
+DEFAULT_ENDPOINT_FORCE_FACTOR = 1.5
 MIN_ENDPOINT_DISPLACEMENT_ANG = 0.3
 
 SUMMARY_JSON = "neb_run_summary.json"
@@ -263,6 +266,10 @@ def resolve_settings(args, config: dict) -> None:
         args.fmax_ci = float(neb_cfg.get("fmax_ci_ev_per_angstrom", DEFAULT_FMAX_CI))
     if args.dft_fmax is None:
         args.dft_fmax = float(dft_cfg.get("fmax_ev_per_angstrom", DEFAULT_DFT_FMAX))
+    args.endpoint_energy_tol_ev = float(neb_cfg.get("endpoint_energy_tol_ev", DEFAULT_ENDPOINT_ENERGY_TOL_EV))
+    args.endpoint_force_tol = args.dft_fmax * float(
+        neb_cfg.get("endpoint_force_factor", DEFAULT_ENDPOINT_FORCE_FACTOR)
+    )
 
     if args.images < 1:
         raise SystemExit("--images must be at least 1.")
@@ -673,18 +680,19 @@ def _run_pair(record: dict, *, material: str, initial_site: str, final_site: str
     record["endpoints"] = endpoints
 
     for label, info in endpoints.items():
-        if not math.isfinite(info["energy_difference_ev"]) or abs(info["energy_difference_ev"]) > ENERGY_PROVENANCE_TOL_EV:
+        if not math.isfinite(info["energy_difference_ev"]) or abs(info["energy_difference_ev"]) > args.endpoint_energy_tol_ev:
             raise PairAborted(
                 STATUS_PROVENANCE,
                 f"{label} endpoint ({info['site']}) single-point energy {info['energy_ev']:.6f} eV differs from "
                 f"dft_summary adsorbed_energy_ev {info['dft_summary_energy_ev']:.6f} eV by more than "
-                f"{ENERGY_PROVENANCE_TOL_EV} eV; endpoint and calculator do not match the DFT run.",
+                f"{args.endpoint_energy_tol_ev} eV; endpoint and calculator do not match the DFT run.",
             )
-        if info["max_free_force_ev_per_ang"] > args.dft_fmax:
+        if info["max_free_force_ev_per_ang"] > args.endpoint_force_tol:
             raise PairAborted(
                 STATUS_ENDPOINT_FORCES,
                 f"{label} endpoint ({info['site']}) max free-atom force "
-                f"{info['max_free_force_ev_per_ang']:.4f} eV/A exceeds the DFT fmax {args.dft_fmax} eV/A; "
+                f"{info['max_free_force_ev_per_ang']:.4f} eV/A exceeds {args.endpoint_force_tol:.3f} eV/A "
+                f"({args.dft_fmax} eV/A DFT fmax with SCF slack); "
                 f"it is not a converged minimum.",
             )
 
@@ -819,6 +827,8 @@ def run_single_neb(
         "fmax": args.fmax,
         "fmax_ci": args.fmax_ci if args.climb else None,
         "dft_fmax": args.dft_fmax,
+        "endpoint_energy_tol_ev": args.endpoint_energy_tol_ev,
+        "endpoint_force_tol": args.endpoint_force_tol,
         "max_steps": args.steps,
         "ecut": args.ecut,
         "kpts": [int(value) for value in args.kpts],

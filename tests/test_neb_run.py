@@ -178,13 +178,13 @@ class RunNebTests(unittest.TestCase):
         self.assertAlmostEqual(summary["forward_barrier_eV"], 3 * AMPLITUDE, places=2)
 
     def test_provenance_mismatch_aborts_and_exits_nonzero(self):
-        self.write_endpoints({"top_metal": 0.0, "bridge": PERIOD}, energies={"bridge": 0.01})
+        self.write_endpoints({"top_metal": 0.0, "bridge": PERIOD}, energies={"bridge": 0.05})
         with self.assertRaises(SystemExit) as raised:
             self.run_pairs("--initial-site", "top_metal", "--final-site", "bridge")
         self.assertEqual(raised.exception.code, 1)
         summary = self.summary("top_metal_to_bridge")
         self.assertEqual(summary["status"], "aborted_provenance")
-        self.assertAlmostEqual(summary["endpoints"]["final"]["energy_difference_ev"], -0.01)
+        self.assertAlmostEqual(summary["endpoints"]["final"]["energy_difference_ev"], -0.05)
         self.assertNotIn("forward_barrier_eV", summary)
 
     def test_unconverged_endpoint_aborts(self):

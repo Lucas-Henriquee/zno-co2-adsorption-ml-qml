@@ -279,6 +279,12 @@ def build_commands(
             "--sites", *sites,
             "--max-transitions", str(positive_int(settings, "max_transitions", method)),
             "--osc-threshold", str(positive_float(settings, "oscillator_strength_threshold", method)),
+            "--grid-spacing", str(positive_float(settings, "grid_spacing_angstrom", method)),
+            "--box-size", str(positive_float(settings, "box_size_angstrom", method)),
+            "--smearing-width", str(positive_float(settings, "smearing_width_ev", method)),
+            "--nbands", str(positive_int(settings, "nbands", method)),
+            "--converged-bands", str(positive_int(settings, "converged_bands", method)),
+            "--energy-window", str(positive_float(settings, "energy_window_ev", method)),
         ]]
 
     if method == "co2rr":

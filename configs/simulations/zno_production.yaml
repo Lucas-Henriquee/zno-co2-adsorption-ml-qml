@@ -107,6 +107,9 @@ methods:
     climb: true
     climb_start_fraction: 0.30
     parallel_images: true
+    # Endpoint single points must reproduce the DFT run within these tolerances.
+    endpoint_energy_tol_ev: 0.02
+    endpoint_force_factor: 1.5
     # Elementary hops only: on the 2x1 cell top_metal, bridge and top_oxygen are
     # collinear along y, so top_metal -> top_oxygen would pass over bridge.
     pairs:
