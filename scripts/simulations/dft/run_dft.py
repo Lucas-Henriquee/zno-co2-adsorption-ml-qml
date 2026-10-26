@@ -4,6 +4,7 @@ from scripts.common.timer import timer, print0
 import argparse
 import csv
 import json
+import math
 from pathlib import Path
 from typing import Iterable
 
@@ -13,6 +14,40 @@ except ImportError as exc:
     raise SystemExit("NumPy is required. Install with: pip install numpy") from exc
 
 from scripts.common.project_config import ADSORPTION_SITES, DFT_SITES, DFT_RESULTS_DIR, GEOMETRY_DIR, MATERIALS, RESULTS_DIR, ensure_directories
+
+
+# Sanity thresholds (audit D8).
+MIN_INITIAL_DISTANCE_ANG = 1.5  # closest pair allowed in a start geometry (CO2 bonds exempt)
+DISSOCIATED_CO_ANG = 1.6  # any C-O longer than this: CO2 broke apart
+DESORBED_C_SLAB_ANG = 4.5  # C farther than this from every slab atom: CO2 left the surface
+CHEMISORBED_OCO_DEG = 170.0  # O-C-O bent below this: activated, chemisorbed CO2
+WARN_INITIAL_FMAX = 5.0  # eV/Ang; larger initial forces point to a poor start geometry
+WARN_ABS_EADS = 3.0  # eV; |Eads| above this is unphysical for CO2 on an oxide
+
+
+class GeometryError(RuntimeError):
+    """Start geometry with atoms closer than MIN_INITIAL_DISTANCE_ANG."""
+
+
+class RelaxationNotConverged(RuntimeError):
+    """BFGS hit its step limit: a geometric failure that another SCF profile cannot fix."""
+
+
+class CleanSlabEnergyError(RuntimeError):
+    """Positive clean-slab energy: a broken slab (GPAW energies are relative to free atoms)."""
+
+
+def mpi_rank() -> int:
+    """MPI rank from GPAW, imported lazily so the module works without GPAW (rank 0)."""
+    try:
+        from gpaw.mpi import world
+    except ImportError:
+        return 0
+    return int(world.rank)
+
+
+def is_master() -> bool:
+    return mpi_rank() == 0
 
 
 def _require_ase_and_gpaw() -> None:
@@ -30,13 +65,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--materials", nargs="*", default=sorted(MATERIALS.keys()))
     parser.add_argument("--sites", nargs="*", default=list(ADSORPTION_SITES))
     parser.add_argument("--fmax", type=float, default=0.05, help="Optimization force threshold (eV/Ang).")
-    parser.add_argument("--steps", type=int, default=160, help="Maximum BFGS steps.")
+    parser.add_argument("--steps", type=int, default=180, help="Maximum BFGS steps per block.")
+    parser.add_argument(
+        "--relax-extra-blocks",
+        type=int,
+        default=1,
+        help="Extra blocks of --steps BFGS steps, continued from the last geometry, "
+        "before a relaxation that hit the step limit is declared failed.",
+    )
     parser.add_argument("--ecut", type=float, default=500.0, help="Plane-wave cutoff (eV).")
     parser.add_argument(
         "--kpts",
         nargs=3,
         type=int,
-        default=(3, 3, 1),
+        default=(2, 3, 1),
         metavar=("KX", "KY", "KZ"),
         help="Monkhorst-Pack k-point mesh for slab calculations.",
     )
@@ -45,6 +87,12 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=8.0,
         help="Vacuum padding for gas-phase CO2 reference (Ang).",
+    )
+    parser.add_argument(
+        "--scf-force-convergence",
+        type=float,
+        default=None,
+        help="Optional GPAW SCF force criterion (eV/Ang); default: GPAW's own criteria.",
     )
     return parser.parse_args()
 
@@ -61,10 +109,12 @@ def validate_inputs(materials: Iterable[str], sites: Iterable[str]) -> tuple[lis
     return list(materials), list(sites)
 
 
+# Fallbacks only make the SCF more conservative (mixer, maxiter). The smearing stays at
+# 0.05 eV: with a PBE gap of ~0.6-0.8 eV a wider one occupies the conduction band.
 OPTIMIZATION_PROFILES = (
     {"name": "base", "mode": "pw", "smearing": 0.05, "maxiter": 180, "mixer": (0.05, 5, 50)},
-    {"name": "robust", "mode": "pw", "smearing": 0.15, "maxiter": 280, "mixer": (0.03, 7, 100)},
-    {"name": "very_robust", "mode": "pw", "smearing": 0.25, "maxiter": 420, "mixer": (0.02, 10, 150)},
+    {"name": "robust", "mode": "pw", "smearing": 0.05, "maxiter": 280, "mixer": (0.03, 7, 100)},
+    {"name": "very_robust", "mode": "pw", "smearing": 0.05, "maxiter": 420, "mixer": (0.02, 10, 150)},
 )
 
 CEO2_EXTRA_PROFILES = (
@@ -81,10 +131,14 @@ def build_calculator(
     smearing: float = 0.05,
     maxiter: int = 180,
     mixer: tuple[float, int, float] | None = None,
+    scf_force_convergence: float | None = None,
 ):
     from gpaw import FermiDirac, GPAW, Mixer, PW
 
     calc_kwargs = {}
+    if scf_force_convergence is not None:
+        # Added to GPAW's default criteria (energy, density, eigenstates).
+        calc_kwargs["convergence"] = {"forces": float(scf_force_convergence)}
     if mixer is not None:
         calc_kwargs["mixer"] = Mixer(mixer[0], mixer[1], mixer[2])
     if mode == "lcao":
@@ -124,6 +178,24 @@ def max_free_force(atoms) -> float:
     return float(np.linalg.norm(atoms.get_forces(), axis=1).max())
 
 
+def check_initial_geometry(atoms, label: str, adsorbate_atoms: int = 0) -> float:
+    """Raise GeometryError if two atoms overlap; bonds inside the adsorbate are exempt."""
+    n_atoms = len(atoms)
+    distances = atoms.get_all_distances(mic=True)
+    np.fill_diagonal(distances, np.inf)
+    if adsorbate_atoms:
+        first = max(n_atoms - adsorbate_atoms, 0)
+        distances[first:, first:] = np.inf
+    i, j = np.unravel_index(int(np.argmin(distances)), distances.shape)
+    d_min = float(distances[i, j])
+    if d_min < MIN_INITIAL_DISTANCE_ANG:
+        raise GeometryError(
+            f"{label}: atoms {i} ({atoms[i].symbol}) and {j} ({atoms[j].symbol}) are "
+            f"{d_min:.3f} Ang apart (< {MIN_INITIAL_DISTANCE_ANG} Ang) in the start geometry"
+        )
+    return d_min
+
+
 def optimize_structure(
     atoms,
     output_dir: Path,
@@ -133,7 +205,16 @@ def optimize_structure(
     fmax: float,
     steps: int,
     profiles=None,
+    relax_extra_blocks: int = 1,
+    scf_force_convergence: float | None = None,
 ) -> tuple[float, float, object, str]:
+    """Relax with the first SCF profile that works.
+
+    An SCF/GPAW exception moves to the next profile, from the initial geometry. A BFGS
+    that hits the step limit is a geometric problem: it continues from its last geometry
+    (same profile and Hessian) for up to `relax_extra_blocks` blocks of `steps`, then
+    fails without trying other profiles.
+    """
     from ase.io import write
     from ase.optimize import BFGS
 
@@ -155,6 +236,7 @@ def optimize_structure(
             smearing=float(profile["smearing"]),
             maxiter=int(profile["maxiter"]),
             mixer=profile["mixer"],
+            scf_force_convergence=scf_force_convergence,
         )
         trial.calc = calc
 
@@ -165,15 +247,28 @@ def optimize_structure(
         )
 
         try:
+            fmax_initial = max_free_force(trial)  # cached by the calculator for BFGS
             converged = dyn.run(fmax=fmax, steps=steps)
+            restarts = 0
             # BFGS.run returns False when it stops at the step limit; it does not raise.
+            # Another run() continues from the current geometry for `steps` more steps.
+            while (not converged or max_free_force(trial) > fmax) and restarts < relax_extra_blocks:
+                restarts += 1
+                print0(
+                    f"[dft] {label}: BFGS hit the step limit ({dyn.nsteps} steps, "
+                    f"profile={profile_name}); continuing from the last geometry"
+                )
+                converged = dyn.run(fmax=fmax, steps=steps)
             fmax_final = max_free_force(trial)
             if not converged or fmax_final > fmax:
-                raise RuntimeError(
-                    f"{label}: BFGS did not converge in {steps} steps "
-                    f"(fmax {fmax_final:.3f} > {fmax} eV/Ang)"
+                raise RelaxationNotConverged(
+                    f"{label}: BFGS did not converge in {dyn.nsteps} steps "
+                    f"({restarts} continuation(s) of {steps}; "
+                    f"fmax {fmax_final:.3f} > {fmax} eV/Ang, profile={profile_name})"
                 )
             trial.info["n_steps"] = int(dyn.nsteps)
+            trial.info["relax_restarts"] = restarts
+            trial.info["fmax_initial"] = fmax_initial
             trial.info["fmax_final"] = fmax_final
             energy = float(trial.get_potential_energy())
             calc.write(str(output_dir / f"{label}.gpw"), mode="all")
@@ -186,10 +281,14 @@ def optimize_structure(
             return energy, gap, trial, profile_name
         except Exception as exc:
             last_error = exc
-            (output_dir / f"{label}.{profile_name}.error.txt").write_text(
-                f"{type(exc).__name__}: {exc}\n",
-                encoding="utf-8",
-            )
+            if is_master():
+                (output_dir / f"{label}.{profile_name}.error.txt").write_text(
+                    f"{type(exc).__name__}: {exc}\n",
+                    encoding="utf-8",
+                )
+            if isinstance(exc, RelaxationNotConverged):
+                # Restarting from the initial geometry with another SCF profile cannot help.
+                raise
 
     raise RuntimeError(
         f"All optimization profiles failed for {label}. Last error: {last_error}"
@@ -240,6 +339,7 @@ def co2_reference_energy(
     fmax: float,
     steps: int,
     profile: dict[str, object],
+    scf_force_convergence: float | None = None,
 ) -> float:
     from ase import Atoms
     from ase.io import write
@@ -260,6 +360,7 @@ def co2_reference_energy(
         smearing=float(profile["smearing"]),
         maxiter=max(220, int(profile["maxiter"])),
         mixer=tuple(profile["mixer"]),
+        scf_force_convergence=scf_force_convergence,
     )
     co2.calc = calc
     dyn = BFGS(
@@ -279,15 +380,16 @@ def co2_reference_energy(
     calc.write(str(output_dir / f"co2_ref.{profile_name}.gpw"), mode="all")
     write(output_dir / f"co2_ref.{profile_name}_optimized.cif", co2)
 
-    with (output_dir / f"co2_reference.{profile_name}.json").open("w", encoding="utf-8") as handle:
-        json.dump(
-            {
-                "profile": profile_name,
-                "co2_reference_energy_ev": energy,
-            },
-            handle,
-            indent=2,
-        )
+    if is_master():
+        with (output_dir / f"co2_reference.{profile_name}.json").open("w", encoding="utf-8") as handle:
+            json.dump(
+                {
+                    "profile": profile_name,
+                    "co2_reference_energy_ev": energy,
+                },
+                handle,
+                indent=2,
+            )
 
     return energy
 
@@ -325,6 +427,43 @@ def adsorption_geometry_metrics(atoms) -> dict[str, float]:
     }
 
 
+def classify_final_state(metrics: dict[str, float]) -> str:
+    """Relaxed CO2 state, checked in order: dissociated, desorbed, chemisorbed, physisorbed."""
+    keys = ("co_bond_1_ang", "co_bond_2_ang", "c_min_slab_distance_ang", "oco_angle_deg")
+    values = [float(metrics.get(key, float("nan"))) for key in keys]
+    if any(math.isnan(value) for value in values):
+        return "unknown"
+    co_1, co_2, c_min_slab, oco_angle = values
+    if max(co_1, co_2) > DISSOCIATED_CO_ANG:
+        return "dissociated"
+    if c_min_slab > DESORBED_C_SLAB_ANG:
+        return "desorbed"
+    if oco_angle < CHEMISORBED_OCO_DEG:
+        return "chemisorbed"
+    return "physisorbed"
+
+
+def sanity_warnings(clean_atoms, ads_atoms, adsorption_energy: float) -> str:
+    """Semicolon-separated warnings for a finished case; empty when nothing is suspicious."""
+    warnings = []
+    for name, atoms in (("clean", clean_atoms), ("adsorbed", ads_atoms)):
+        fmax_initial = float(atoms.info.get("fmax_initial", float("nan")))
+        if fmax_initial > WARN_INITIAL_FMAX:
+            warnings.append(f"{name} initial fmax {fmax_initial:.2f} > {WARN_INITIAL_FMAX} eV/Ang")
+    if abs(adsorption_energy) > WARN_ABS_EADS:
+        warnings.append(f"|Eads| {abs(adsorption_energy):.2f} > {WARN_ABS_EADS} eV")
+    return "; ".join(warnings)
+
+
+def check_clean_slab_energy(energy: float, material: str, profile_name: str) -> None:
+    # A bound slab is below its free atoms; the old, broken ZnO slab gave +317 eV.
+    if energy > 0.0:
+        raise CleanSlabEnergyError(
+            f"{material} clean slab energy is positive ({energy:.3f} eV, profile={profile_name}); "
+            "the slab geometry is unphysical, check build_geometries.py"
+        )
+
+
 def read_geometry(path: Path):
     from ase.io import read
 
@@ -336,7 +475,7 @@ def read_geometry(path: Path):
 
 
 def write_summary(rows: list[dict[str, float | str]]) -> None:
-    if not rows:
+    if not rows or not is_master():
         return
     fieldnames: list[str] = []
     for row in rows:
@@ -356,6 +495,56 @@ def read_existing_summary(path: Path) -> list[dict[str, float | str]]:
         return []
     with path.open("r", newline="", encoding="utf-8") as handle:
         return list(csv.DictReader(handle))
+
+
+def kpts_label(kpts: Iterable[int]) -> str:
+    return "x".join(str(int(value)) for value in kpts)
+
+
+def settings_match(row: dict[str, float | str], ecut: float, kpts: str, n_slab_atoms: int | None) -> bool:
+    """True if an existing row was computed with the same cutoff, k-mesh and slab size."""
+    try:
+        return (
+            math.isclose(float(row["ecut_ev"]), float(ecut))
+            and str(row["kpts"]) == kpts
+            and n_slab_atoms is not None
+            and int(float(row["n_slab_atoms"])) == n_slab_atoms
+        )
+    except (KeyError, TypeError, ValueError):
+        return False  # rows from older versions lack the settings columns
+
+
+def compatible_existing_rows(
+    rows: list[dict[str, float | str]],
+    ecut: float,
+    kpts: str,
+    slab_atoms_by_material: dict[str, int],
+) -> list[dict[str, float | str]]:
+    """Keep only rows with the current physics settings; report the dropped ones."""
+    kept = []
+    dropped = []
+    for row in rows:
+        n_slab = slab_atoms_by_material.get(str(row.get("material", "")))
+        if settings_match(row, ecut, kpts, n_slab):
+            kept.append(row)
+        else:
+            dropped.append(row_key(row))
+    if dropped:
+        print0(
+            f"[dft] warning: dropped {len(dropped)} row(s) from the existing summary computed "
+            f"with other settings than ecut={ecut} eV, kpts={kpts} or the current slab: {dropped}"
+        )
+    return kept
+
+
+def slab_atom_counts(materials: Iterable[str]) -> dict[str, int]:
+    """Atoms in each material's current clean slab, for materials with a geometry file."""
+    counts = {}
+    for material in materials:
+        path = GEOMETRY_DIR / material / "clean_slab.traj"
+        if path.exists():
+            counts[material] = len(read_geometry(path))
+    return counts
 
 
 def row_key(row: dict[str, float | str]) -> tuple[str, str]:
@@ -404,6 +593,8 @@ def make_failure_row(
         "c_surface_distance_ang": float("nan"),
         "c_min_slab_distance_ang": float("nan"),
         "o_min_metal_distance_ang": float("nan"),
+        "final_state": "",
+        "warnings": "",
     }
 
 
@@ -412,6 +603,10 @@ def run_dft_workflow(args: argparse.Namespace) -> None:
     materials, sites = validate_inputs(args.materials, args.sites)
     kpts = tuple(int(value) for value in args.kpts)
     output_csv = RESULTS_DIR / "dft_summary.csv"
+    # Absent from Namespaces built by older callers; defaults match parse_args.
+    relax_extra_blocks = int(getattr(args, "relax_extra_blocks", 1))
+    scf_force_convergence = getattr(args, "scf_force_convergence", None)
+    n_slab_by_material: dict[str, int] = {}
 
     reference_dir = DFT_RESULTS_DIR / "_reference"
     profile_catalog = {
@@ -432,17 +627,33 @@ def run_dft_workflow(args: argparse.Namespace) -> None:
                 fmax=args.fmax,
                 steps=args.steps,
                 profile=profile,
+                scf_force_convergence=scf_force_convergence,
             )
         co2_reference_cache[profile_name] = energy
         print0(f"[dft] CO2 gas reference energy ({profile_name}) = {energy:.6f} eV")
         return energy
 
+    # Merge rows from an earlier run only if they share cutoff, k-mesh and slab size.
+    existing_rows = read_existing_summary(output_csv)
+    existing_materials = {str(row.get("material", "")) for row in existing_rows}
     rows_by_key: dict[tuple[str, str], dict[str, float | str]] = {
-        row_key(row): row for row in read_existing_summary(output_csv)
+        row_key(row): row
+        for row in compatible_existing_rows(
+            existing_rows,
+            ecut=args.ecut,
+            kpts=kpts_label(kpts),
+            slab_atoms_by_material=slab_atom_counts(existing_materials & set(MATERIALS)),
+        )
     }
 
     def upsert_row(row: dict[str, float | str]) -> None:
-        rows_by_key[row_key(row)] = row
+        material = str(row["material"])
+        rows_by_key[row_key(row)] = {
+            **row,
+            "ecut_ev": float(args.ecut),
+            "kpts": kpts_label(kpts),
+            "n_slab_atoms": n_slab_by_material.get(material, ""),
+        }
 
     def flush_summary() -> None:
         write_summary(ordered_rows(rows_by_key))
@@ -456,8 +667,10 @@ def run_dft_workflow(args: argparse.Namespace) -> None:
 
         clean_atoms_in = read_geometry(GEOMETRY_DIR / material / "clean_slab.traj")
         apply_bottom_layer_constraint(clean_atoms_in, adsorbate_atoms=0)
+        n_slab_by_material[material] = len(clean_atoms_in)
 
         try:
+            check_initial_geometry(clean_atoms_in, f"{material} clean_slab")
             with timer(f"DFT clean slab → {material}"):
                 clean_energy, clean_gap, clean_atoms_opt, clean_profile = optimize_structure(
                     atoms=clean_atoms_in,
@@ -468,20 +681,24 @@ def run_dft_workflow(args: argparse.Namespace) -> None:
                     fmax=args.fmax,
                     steps=args.steps,
                     profiles=profiles_for_material,
+                    relax_extra_blocks=relax_extra_blocks,
+                    scf_force_convergence=scf_force_convergence,
                 )
             print0(
                 f"[dft] {material} clean slab energy = {clean_energy:.6f} eV "
                 f"(profile={clean_profile})"
             )
+            check_clean_slab_energy(clean_energy, material, clean_profile)
         except Exception as exc:
             message = f"{type(exc).__name__}: {exc}"
+            status = "bad_initial_geometry" if isinstance(exc, GeometryError) else "clean_failed"
             print0(f"[dft] {material} clean slab failed: {message}")
             for site in sites:
                 upsert_row(
                     make_failure_row(
                         material=material,
                         site=site,
-                        status="clean_failed",
+                        status=status,
                         message=message,
                     )
                 )
@@ -490,22 +707,32 @@ def run_dft_workflow(args: argparse.Namespace) -> None:
 
         # Clean slab per SCF profile: Eads subtracts terms of one profile only.
         clean_by_profile = {clean_profile: (clean_energy, clean_gap, clean_atoms_opt)}
+        clean_errors: dict[str, Exception] = {}  # a failed fallback slab is not retried per site
 
         def clean_for_profile(profile_name: str):
+            if profile_name in clean_errors:
+                raise clean_errors[profile_name]
             if profile_name not in clean_by_profile:
                 slab_in = read_geometry(GEOMETRY_DIR / material / "clean_slab.traj")
                 apply_bottom_layer_constraint(slab_in, adsorbate_atoms=0)
-                with timer(f"DFT clean slab → {material} ({profile_name})"):
-                    energy, gap, atoms_opt, _ = optimize_structure(
-                        atoms=slab_in,
-                        output_dir=material_out / f"clean_{profile_name}",
-                        label="clean_slab",
-                        ecut=args.ecut,
-                        kpts=kpts,
-                        fmax=args.fmax,
-                        steps=args.steps,
-                        profiles=(profile_catalog[profile_name],),
-                    )
+                try:
+                    with timer(f"DFT clean slab → {material} ({profile_name})"):
+                        energy, gap, atoms_opt, _ = optimize_structure(
+                            atoms=slab_in,
+                            output_dir=material_out / f"clean_{profile_name}",
+                            label="clean_slab",
+                            ecut=args.ecut,
+                            kpts=kpts,
+                            fmax=args.fmax,
+                            steps=args.steps,
+                            profiles=(profile_catalog[profile_name],),
+                            relax_extra_blocks=relax_extra_blocks,
+                            scf_force_convergence=scf_force_convergence,
+                        )
+                    check_clean_slab_energy(energy, material, profile_name)
+                except Exception as exc:
+                    clean_errors[profile_name] = exc
+                    raise
                 clean_by_profile[profile_name] = (energy, gap, atoms_opt)
             return clean_by_profile[profile_name]
 
@@ -541,6 +768,7 @@ def run_dft_workflow(args: argparse.Namespace) -> None:
             clean_co2_energy = float("nan")
 
             try:
+                check_initial_geometry(ads_atoms_in, f"{material}_{site}", adsorbate_atoms=3)
                 with timer(f"DFT adsorption → {material} | {site}"):
                     ads_energy, ads_gap, ads_atoms_opt, ads_profile = optimize_structure(
                         atoms=ads_atoms_in,
@@ -551,16 +779,22 @@ def run_dft_workflow(args: argparse.Namespace) -> None:
                         fmax=args.fmax,
                         steps=args.steps,
                         profiles=ads_profiles,
+                        relax_extra_blocks=relax_extra_blocks,
+                        scf_force_convergence=scf_force_convergence,
                     )
 
                 slab_energy, slab_gap, slab_atoms_opt = clean_for_profile(ads_profile)
                 clean_co2_energy = get_co2_reference_for_profile(ads_profile)
                 adsorption_energy = ads_energy - slab_energy - clean_co2_energy
                 geometry_metrics = adsorption_geometry_metrics(ads_atoms_opt)
+                final_state = classify_final_state(geometry_metrics)
+                warnings = sanity_warnings(slab_atoms_opt, ads_atoms_opt, adsorption_energy)
                 print0(
                     f"[dft] {material} {site} adsorption energy = {adsorption_energy:.6f} eV "
-                    f"(profile={ads_profile})"
+                    f"(profile={ads_profile}, final_state={final_state})"
                 )
+                if warnings:
+                    print0(f"[dft] warning: {material} {site}: {warnings}")
 
                 upsert_row(
                     {
@@ -578,21 +812,33 @@ def run_dft_workflow(args: argparse.Namespace) -> None:
                         "clean_band_gap_gamma_ev": slab_atoms_opt.info.get("band_gap_gamma", float("nan")),
                         "adsorbed_band_gap_gamma_ev": ads_atoms_opt.info.get("band_gap_gamma", float("nan")),
                         "clean_n_steps": slab_atoms_opt.info["n_steps"],
+                        "clean_relax_restarts": slab_atoms_opt.info.get("relax_restarts", 0),
+                        "clean_fmax_initial_ev_per_ang": slab_atoms_opt.info.get("fmax_initial", float("nan")),
                         "clean_fmax_final_ev_per_ang": slab_atoms_opt.info["fmax_final"],
                         "adsorbed_n_steps": ads_atoms_opt.info["n_steps"],
+                        "adsorbed_relax_restarts": ads_atoms_opt.info.get("relax_restarts", 0),
+                        "adsorbed_fmax_initial_ev_per_ang": ads_atoms_opt.info.get("fmax_initial", float("nan")),
                         "adsorbed_fmax_final_ev_per_ang": ads_atoms_opt.info["fmax_final"],
                         **geometry_metrics,
+                        "final_state": final_state,
+                        "warnings": warnings,
                     }
                 )
             except Exception as exc:
                 message = f"{type(exc).__name__}: {exc}"
                 print0(f"[dft] {material} {site} failed: {message}")
+                if isinstance(exc, GeometryError):
+                    status = "bad_initial_geometry"
+                elif isinstance(exc, CleanSlabEnergyError):
+                    status = "clean_failed"
+                else:
+                    status = "ads_failed"
                 upsert_row(
                     {
                         **make_failure_row(
                             material=material,
                             site=site,
-                            status="ads_failed",
+                            status=status,
                             message=message,
                             co2_energy=clean_co2_energy,
                         ),

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import hashlib
 import json
 import os
@@ -16,6 +17,8 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+
+from scripts.common.project_config import DFT_SITES, EXPLORATORY_SITES
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -39,7 +42,9 @@ MODULES = {
     "neb": "scripts.simulations.neb.run_neb",
 }
 VALID_MATERIALS = {"ZnO", "TiO2", "CeO2"}
-VALID_SITES = {"top_metal", "top_oxygen", "bridge", "carbonate"}  # carbonate: DFT only
+VALID_SITES = set(DFT_SITES)
+# Methods that accept the DFT-only exploratory sites (e.g. carbonate).
+EXPLORATORY_SITE_METHODS = ("geometry", "dft")
 
 
 def parse_args() -> argparse.Namespace:
@@ -150,6 +155,17 @@ def validate_choice_list(values: list[str], valid: set[str], label: str) -> None
         fail(f"Unknown {label}: {', '.join(unknown)}")
 
 
+def validate_exploratory_sites(sites: list[str], methods: list[str]) -> None:
+    """Exploratory starts are DFT-only; other methods would crash on them, so fail early."""
+    exploratory = [site for site in sites if site in EXPLORATORY_SITES]
+    other_methods = [method for method in methods if method not in EXPLORATORY_SITE_METHODS]
+    if exploratory and other_methods:
+        fail(
+            f"{', '.join(exploratory)} is a DFT-only exploratory site; it cannot run with "
+            f"{', '.join(other_methods)}. Run it separately with: dft --sites {','.join(exploratory)}"
+        )
+
+
 def validate_triplet(value: Any, label: str) -> list[int]:
     if not isinstance(value, list) or len(value) != 3:
         fail(f"Configuration field '{label}' must contain three integers.")
@@ -238,7 +254,7 @@ def build_commands(
 
     if method == "dft":
         kpoints = validate_triplet(required_value(settings, "kpoints", method), "methods.dft.kpoints")
-        return [[
+        command = [
             *prefix,
             "--materials", *materials,
             "--sites", *sites,
@@ -247,7 +263,14 @@ def build_commands(
             "--ecut", str(positive_float(settings, "ecut_ev", method)),
             "--kpts", *map(str, kpoints),
             "--co2-box-vacuum", str(positive_float(settings, "co2_box_vacuum_angstrom", method)),
-        ]]
+        ]
+        relax_extra_blocks = int(settings.get("relax_extra_blocks", 1))
+        if relax_extra_blocks < 0:
+            fail("methods.dft.relax_extra_blocks must be zero or a positive integer.")
+        command += ["--relax-extra-blocks", str(relax_extra_blocks)]
+        if settings.get("scf_force_convergence") is not None:
+            command += ["--scf-force-convergence", str(positive_float(settings, "scf_force_convergence", method))]
+        return [command]
 
     if method == "tddft":
         return [[
@@ -383,6 +406,26 @@ def run_command(command: list[str], log_path: Path, environment: dict[str, str])
         raise subprocess.CalledProcessError(return_code, command)
 
 
+def verify_method_outputs(method: str, run_dir: Path, materials: list[str], sites: list[str]) -> None:
+    """Second check after a zero exit code: every requested DFT case must be 'ok'.
+
+    The exit code is the primary failure signal for every method (run_command raises on
+    a non-zero one). Only the DFT summary is cross-checked here, because its per-case
+    status column is cheap to read; the other methods rely on their exit codes.
+    """
+    if method != "dft":
+        return
+    summary_path = run_dir / "dft_summary.csv"
+    if not summary_path.is_file():
+        raise RuntimeError(f"dft exited 0 but wrote no summary: {summary_path}")
+    with summary_path.open("r", newline="", encoding="utf-8") as handle:
+        status = {(row.get("material"), row.get("site")): row.get("dft_status") for row in csv.DictReader(handle)}
+    not_ok = [f"{material}/{site}" for material in materials for site in sites
+              if status.get((material, site)) != "ok"]
+    if not_ok:
+        raise RuntimeError(f"dft exited 0 but these cases are not ok: {', '.join(not_ok)}")
+
+
 def main() -> None:
     args = parse_args()
     if args.list_methods:
@@ -400,6 +443,7 @@ def main() -> None:
     sites = parse_csv_override(args.sites, selection.get("sites"), "sites")
     validate_choice_list(materials, VALID_MATERIALS, "materials")
     validate_choice_list(sites, VALID_SITES, "sites")
+    validate_exploratory_sites(sites, resolved_methods)
 
     execution = require_mapping(config, "execution")
     configured_environment = str(execution.get("environment", "qml-zno-simulation"))
@@ -555,6 +599,7 @@ def main() -> None:
                         raise RuntimeError(f"{method} requires completed {dependency} in this run.")
                 for command in commands_by_method[method]:
                     run_command(command, log_path, runtime_environment)
+                verify_method_outputs(method, run_dir, materials, sites)
             except BaseException as exc:
                 method_record["status"] = "failed"
                 method_record["failed_at"] = utc_now()

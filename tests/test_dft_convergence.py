@@ -27,13 +27,14 @@ def _stretched_dimer():
 
 @unittest.skipIf(Atoms is None, "ASE is required")
 class BFGSConvergenceTests(unittest.TestCase):
-    def run_optimize(self, steps):
+    def run_optimize(self, steps, relax_extra_blocks=0):
         profile = {"name": "base", "mode": "pw", "smearing": 0.05, "maxiter": 10, "mixer": None}
         with tempfile.TemporaryDirectory() as tmp, \
                 mock.patch.object(run_dft, "build_calculator", return_value=_WritableLJ()):
             return run_dft.optimize_structure(
                 atoms=_stretched_dimer(), output_dir=Path(tmp), label="dimer",
                 ecut=500.0, kpts=(1, 1, 1), fmax=0.05, steps=steps, profiles=(profile,),
+                relax_extra_blocks=relax_extra_blocks,
             )
 
     def test_step_limit_is_a_failure_not_a_result(self):
@@ -89,7 +90,7 @@ class WorkflowProfileTests(unittest.TestCase):
         calls = []
         slab = Atoms("ZnO", positions=[(0, 0, 0), (0, 0, 2)], cell=[5, 5, 10])
 
-        def fake_optimize(atoms, output_dir, label, ecut, kpts, fmax, steps, profiles):
+        def fake_optimize(atoms, output_dir, label, ecut, kpts, fmax, steps, profiles, **kwargs):
             names = [p["name"] for p in profiles]
             calls.append((label, names))
             if label == "clean_slab":
@@ -105,7 +106,7 @@ class WorkflowProfileTests(unittest.TestCase):
             out.info.update(n_steps=10, fmax_final=0.04)
             return energy, 1.0, out, profile
 
-        def fake_co2(output_dir, ecut, vacuum, fmax, steps, profile):
+        def fake_co2(output_dir, ecut, vacuum, fmax, steps, profile, **kwargs):
             if co2_fails:
                 raise RuntimeError("co2 did not converge")
             return {"base": -22.7, "robust": -22.8, "very_robust": -22.9}[profile["name"]]
