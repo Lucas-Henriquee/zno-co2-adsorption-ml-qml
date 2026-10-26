@@ -2,18 +2,16 @@
 
 | Location | Contents |
 | --- | --- |
-| `simulations/<run-id>/` | New simulation campaigns |
-| `models/<run-id>/` | New model runs |
-| `analyses/<run-id>/` | New tables and plots |
+| `simulations/<run-id>/` | Simulation campaigns |
+| `models/<run-id>/` | Model runs |
+| `analyses/<run-id>/` | Tables and plots |
 | `workflows/<run-id>/` | Combined-workflow manifests and logs |
-| `dft/`, `tddft/`, `md/`, `neb*/`, `pathways/` | Earlier simulation campaigns |
-| `svm*/`, `qsvm*/`, `benchmarks/` | Earlier model experiments |
-| `datasets/`, `tables/`, `figures/`, `my_analysis/` | Derived data and analyses |
+| `_invalid_ic_v1/` | Archived results of the first IC campaign; **invalid**, see its README |
 
-Existing paths are retained because notebooks, scripts, and experiment metadata
-refer to them. New runs use distinct IDs and record their inputs and settings.
+New runs use distinct IDs and record their inputs and settings.
 
 `simulations/zno_wurtzite_production/` is an interrupted campaign with
-different input geometries. Do not use it to reproduce the manuscript results.
+different input geometries. Do not use it.
 
-The [figure guide](../docs/figures.md) lists the saved manuscript benchmarks.
+The [figure guide](../docs/figures.md) describes the manuscript figures; they must be
+regenerated from new runs, since the earlier benchmarks are in `_invalid_ic_v1/`.

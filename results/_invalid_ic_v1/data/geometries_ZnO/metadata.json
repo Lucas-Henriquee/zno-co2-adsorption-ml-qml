@@ -1,0 +1,35 @@
+{
+  "material": "ZnO",
+  "miller_index": [
+    1,
+    0,
+    0
+  ],
+  "site_positions_angstrom": {
+    "top_metal": [
+      1.6245000000000005,
+      0.0,
+      12.81371653689564
+    ],
+    "top_oxygen": [
+      1.6245000000000005,
+      1.9912950000000003,
+      12.81371653689564
+    ],
+    "bridge": [
+      1.6245000000000005,
+      2.2971475,
+      12.81371653689564
+    ]
+  },
+  "generated_structures": {
+    "clean_slab": "/home/lucas/Documents/GitHub - Repository/matmod/qml-co2-splitting-mo/data/geometries/ZnO/clean_slab.traj",
+    "clean_slab_cif": "/home/lucas/Documents/GitHub - Repository/matmod/qml-co2-splitting-mo/data/geometries/ZnO/clean_slab.cif",
+    "top_metal": "/home/lucas/Documents/GitHub - Repository/matmod/qml-co2-splitting-mo/data/geometries/ZnO/co2_top_metal.traj",
+    "top_metal_cif": "/home/lucas/Documents/GitHub - Repository/matmod/qml-co2-splitting-mo/data/geometries/ZnO/co2_top_metal.cif",
+    "top_oxygen": "/home/lucas/Documents/GitHub - Repository/matmod/qml-co2-splitting-mo/data/geometries/ZnO/co2_top_oxygen.traj",
+    "top_oxygen_cif": "/home/lucas/Documents/GitHub - Repository/matmod/qml-co2-splitting-mo/data/geometries/ZnO/co2_top_oxygen.cif",
+    "bridge": "/home/lucas/Documents/GitHub - Repository/matmod/qml-co2-splitting-mo/data/geometries/ZnO/co2_bridge.traj",
+    "bridge_cif": "/home/lucas/Documents/GitHub - Repository/matmod/qml-co2-splitting-mo/data/geometries/ZnO/co2_bridge.cif"
+  }
+}
