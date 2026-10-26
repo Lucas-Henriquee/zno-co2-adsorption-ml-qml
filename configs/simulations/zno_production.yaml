@@ -62,10 +62,20 @@ methods:
     molecule_box_vacuum_angstrom: 8.0
 
   md:
+    # The MD uses the GPAW profile (smearing, mixer, maxiter) of the DFT run for each
+    # site (dft_summary.csv: dft_profile); ecut_ev and kpoints must equal methods.dft.
     temperature_kelvin: 300.0
+    # Deprecated alias of production_steps, kept for the workflow command line.
     steps: 2000
+    equilibration_steps: 1000  # 1 ps at 1 fs; written separately, not used for descriptors
+    production_steps: 2000
     timestep_fs: 1.0
+    friction_per_fs: 0.01  # Langevin friction in fs^-1 (tau = 100 fs)
     log_interval: 20
+    seed: 1234
+    seeds: []  # several seeds -> one independent trajectory each (md/<material>/<site>/seed_<n>)
+    nve_test_steps: 200  # only with run_md.py --nve-test
+    nve_test_timesteps_fs: [0.5, 1.0]
     ecut_ev: 500.0
     kpoints: [2, 3, 1]
 
