@@ -3,8 +3,8 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import math
 import platform
+import sys
 import time
 from datetime import datetime
 from importlib.metadata import PackageNotFoundError, version
@@ -21,57 +21,48 @@ from sklearn.metrics import (
     precision_score,
     recall_score,
 )
-from sklearn.model_selection import StratifiedKFold, cross_val_score, train_test_split
+from sklearn.model_selection import cross_val_score
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import MinMaxScaler, PowerTransformer, StandardScaler
 from sklearn.svm import SVC
 
+try:
+    from scripts.common.project_config import RESULTS_DIR
+    from scripts.models.grouped_split import (
+        DEFAULT_GROUP_COLUMN,
+        group_summary,
+        grouped_cv_splitter,
+        grouped_train_test_split,
+        load_grouped_dataset,
+        split_table,
+    )
+except ModuleNotFoundError:  # executed as a file from outside the project root
+    sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+    from scripts.common.project_config import RESULTS_DIR
+    from scripts.models.grouped_split import (
+        DEFAULT_GROUP_COLUMN,
+        group_summary,
+        grouped_cv_splitter,
+        grouped_train_test_split,
+        load_grouped_dataset,
+        split_table,
+    )
 
+
+# Only per-window MD descriptors. The former all12/static6/dynamic6/dynamic4/tddft3
+# sets came from the cartesian-product dataset (TDDFT transitions x MD windows x
+# per-site DFT/CO2RR constants), whose per-site constants leaked the label (D1).
 FEATURE_SETS = {
-    "all12": [
-        "feature_tddft_transition_energy_ev",
-        "feature_tddft_transition_oscillator_strength",
-        "feature_tddft_transition_delta_from_peak_ev",
-        "feature_dft_adsorption_energy_ev",
-        "feature_dft_c_surface_distance_a",
-        "feature_dft_gap_change_ev",
-        "feature_co2rr_deltaG_CO2_to_COOH_ev",
-        "feature_co2rr_deltaG_COOH_to_CO_ev",
-        "feature_co2rr_limiting_potential_v",
-        "feature_md_window_c_surface_distance_mean_a",
-        "feature_md_window_c_surface_distance_std_a",
-        "feature_md_window_mean_oco_angle_deg",
-    ],
-    "static6": [
-        "feature_dft_adsorption_energy_ev",
-        "feature_dft_c_surface_distance_a",
-        "feature_dft_gap_change_ev",
-        "feature_co2rr_deltaG_CO2_to_COOH_ev",
-        "feature_co2rr_deltaG_COOH_to_CO_ev",
-        "feature_co2rr_limiting_potential_v",
-    ],
-    "dynamic6": [
-        "feature_tddft_transition_energy_ev",
-        "feature_tddft_transition_oscillator_strength",
-        "feature_tddft_transition_delta_from_peak_ev",
-        "feature_md_window_c_surface_distance_mean_a",
-        "feature_md_window_c_surface_distance_std_a",
-        "feature_md_window_mean_oco_angle_deg",
-    ],
-    "dynamic4": [
-        "feature_tddft_transition_energy_ev",
-        "feature_tddft_transition_oscillator_strength",
-        "feature_md_window_c_surface_distance_mean_a",
-        "feature_md_window_c_surface_distance_std_a",
-    ],
-    "tddft3": [
-        "feature_tddft_transition_energy_ev",
-        "feature_tddft_transition_oscillator_strength",
-        "feature_tddft_transition_delta_from_peak_ev",
-    ],
     "md3": [
         "feature_md_window_c_surface_distance_mean_a",
         "feature_md_window_c_surface_distance_std_a",
+        "feature_md_window_mean_oco_angle_deg",
+    ],
+    "md_mic5": [
+        "feature_md_window_c_min_slab_distance_mean_a",
+        "feature_md_window_o_min_metal_distance_mean_a",
+        "feature_md_window_c_surface_distance_mean_a",
+        "feature_md_window_co_bond_avg_mean_a",
         "feature_md_window_mean_oco_angle_deg",
     ],
 }
@@ -82,9 +73,14 @@ KERNELS = ["linear", "rbf", "poly", "sigmoid"]
 
 def parse_args():
     parser = argparse.ArgumentParser(description="General classical SVM benchmark.")
-    parser.add_argument("--csv", type=Path, default=Path("results/datasets/multitech_expanded_ml_dataset_clean.csv"))
+    parser.add_argument("--csv", type=Path, default=RESULTS_DIR / "datasets" / "md_window_unique_dataset.csv")
     parser.add_argument("--label", default="label_site_id")
-    parser.add_argument("--feature-set", default="all12", choices=sorted(FEATURE_SETS))
+    parser.add_argument(
+        "--group-column",
+        default=DEFAULT_GROUP_COLUMN,
+        help="Column with the independent-trajectory id; train/test and CV never split a group.",
+    )
+    parser.add_argument("--feature-set", default="md3", choices=sorted(FEATURE_SETS))
     parser.add_argument("--features", nargs="+", default=None)
     parser.add_argument("--kernel", default="rbf", choices=KERNELS)
     parser.add_argument("--C", type=float, default=1.0)
@@ -93,10 +89,10 @@ def parse_args():
     parser.add_argument("--class-weight", default="balanced", choices=["balanced", "none"])
     parser.add_argument("--scaler", default="power", choices=SCALERS)
     parser.add_argument("--test-size", type=float, default=0.25)
-    parser.add_argument("--cv", type=int, default=5, help="0 disables cross-validation.")
+    parser.add_argument("--cv", type=int, default=5, help="Grouped CV folds on the training set; 0 disables it.")
     parser.add_argument("--max-samples", type=int, default=0, help="0 uses every available row.")
-    parser.add_argument("--split-file", type=Path, default=None, help="Optional CSV with row_id and split=train/test.")
-    parser.add_argument("--output-dir", type=Path, default=Path("results/svm"))
+    parser.add_argument("--split-file", type=Path, default=None, help="Optional CSV with row_id and split=train/test; must not share groups.")
+    parser.add_argument("--output-dir", type=Path, default=RESULTS_DIR / "svm")
     parser.add_argument("--run-name", default=None)
     parser.add_argument("--random-state", type=int, default=42)
     parser.add_argument("--shuffle-label", action="store_true")
@@ -174,96 +170,20 @@ def make_scaler(name: str):
     raise ValueError(f"Unknown scaler: {name}")
 
 
-def balanced_subsample(df: pd.DataFrame, label: str, max_samples: int, random_state: int) -> pd.DataFrame:
-    if max_samples <= 0 or len(df) <= max_samples:
-        return df.sample(frac=1.0, random_state=random_state).reset_index(drop=True)
-
-    classes = list(df[label].drop_duplicates())
-    n_classes = len(classes)
-    if max_samples < 2 * n_classes:
-        raise ValueError(f"--max-samples must be at least {2 * n_classes} for {n_classes} classes.")
-
-    base, remainder = divmod(max_samples, n_classes)
-    rng = np.random.default_rng(random_state)
-    class_order = list(classes)
-    rng.shuffle(class_order)
-
-    chunks = []
-    selected = set()
-    for i, cls in enumerate(class_order):
-        target = base + (1 if i < remainder else 0)
-        group = df[df[label] == cls]
-        part = group.sample(n=min(target, len(group)), random_state=random_state + i)
-        chunks.append(part)
-        selected.update(part.index.tolist())
-
-    sampled = pd.concat(chunks, axis=0)
-    remaining = max_samples - len(sampled)
-    if remaining > 0:
-        rest = df.drop(index=list(selected), errors="ignore")
-        if len(rest):
-            sampled = pd.concat([
-                sampled,
-                rest.sample(n=min(remaining, len(rest)), random_state=random_state + 10_000),
-            ])
-    return sampled.sample(frac=1.0, random_state=random_state).reset_index(drop=True)
-
-
 def load_base_data(args, features: list[str]) -> pd.DataFrame:
-    df = pd.read_csv(args.csv)
-    df["_row_id"] = np.arange(len(df), dtype=int)
-    required = features + [args.label]
-    missing = [c for c in required if c not in df.columns]
-    if missing:
-        raise ValueError(f"Missing columns: {missing}")
-    return df.dropna(subset=required).copy()
+    return load_grouped_dataset(args.csv, features, args.label, args.group_column)
 
 
 def split_data(args, df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
-    if args.split_file is not None:
-        split = pd.read_csv(args.split_file)
-        if not {"row_id", "split"}.issubset(split.columns):
-            raise ValueError("split-file must contain columns: row_id, split")
-        if split["row_id"].duplicated().any():
-            raise ValueError("split-file contains duplicated row_id values")
-        invalid_splits = sorted(set(split["split"]) - {"train", "test"})
-        if invalid_splits:
-            raise ValueError(f"split-file contains invalid split values: {invalid_splits}")
-        train_ids = split.loc[split["split"] == "train", "row_id"].astype(int).tolist()
-        test_ids = split.loc[split["split"] == "test", "row_id"].astype(int).tolist()
-        if not train_ids or not test_ids:
-            raise ValueError("split-file must contain at least one train and one test row")
-        indexed = df.set_index("_row_id", drop=False)
-        missing_ids = sorted((set(train_ids) | set(test_ids)) - set(indexed.index))
-        if missing_ids:
-            raise ValueError(f"Split contains row_ids unavailable after dropna: {missing_ids[:10]}")
-        if "true_label" in split.columns:
-            expected = split.set_index("row_id")["true_label"]
-            actual = indexed.loc[expected.index, args.label]
-            mismatched = expected.index[expected.astype(str) != actual.astype(str)]
-            if len(mismatched):
-                raise ValueError(
-                    "split-file true_label does not match the dataset for row_ids: "
-                    f"{mismatched[:10].tolist()}"
-                )
-        return indexed.loc[train_ids].copy(), indexed.loc[test_ids].copy()
-
-    sampled = balanced_subsample(df, args.label, args.max_samples, args.random_state)
-    if sampled[args.label].nunique() < 2 or sampled[args.label].value_counts().min() < 2:
-        raise ValueError("Need at least two classes with at least two samples each.")
-
-    n_classes = sampled[args.label].nunique()
-    n_test = math.ceil(len(sampled) * args.test_size)
-    if n_test < n_classes or len(sampled) - n_test < n_classes:
-        raise ValueError("Split too small for stratification. Increase --max-samples or --test-size.")
-
-    train_df, test_df = train_test_split(
-        sampled,
-        test_size=args.test_size,
-        random_state=args.random_state,
-        stratify=sampled[args.label],
+    return grouped_train_test_split(
+        df,
+        args.label,
+        args.group_column,
+        args.test_size,
+        args.max_samples,
+        args.random_state,
+        args.split_file,
     )
-    return train_df.copy(), test_df.copy()
 
 
 def build_svc(args) -> SVC:
@@ -311,12 +231,6 @@ def metric_bundle(y_true, y_pred) -> dict:
         "precision_macro": float(precision_score(y_true, y_pred, average="macro", zero_division=0)),
         "recall_macro": float(recall_score(y_true, y_pred, average="macro", zero_division=0)),
     }
-
-
-def get_cv(y: pd.Series, requested: int) -> int:
-    if requested <= 0:
-        return 0
-    return max(0, min(int(requested), int(y.value_counts().min())))
 
 
 def make_run_dir(args, feature_set_name: str) -> Path:
@@ -372,15 +286,17 @@ def main():
     train_metrics = metric_bundle(y_train, y_train_pred)
 
     all_selected = pd.concat([train_df, test_df], ignore_index=True)
-    cv = get_cv(y_train, args.cv)
+    # CV on the training set only, with whole trajectories per fold; the scaler
+    # is inside the pipeline, so it is refitted on each training fold.
+    splitter, cv = grouped_cv_splitter(train_df, args.label, args.group_column, args.cv, args.random_state)
     cv_mean = cv_std = cv_time = None
-    if cv >= 2:
-        splitter = StratifiedKFold(n_splits=cv, shuffle=True, random_state=args.random_state)
+    if splitter is not None:
         cv_start = time.perf_counter()
         scores = cross_val_score(
             build_model(args),
             X_train,
             y_train,
+            groups=train_df[args.group_column].to_numpy(),
             cv=splitter,
             scoring="balanced_accuracy",
         )
@@ -401,10 +317,7 @@ def main():
     (run_dir / "classification_report.txt").write_text(classification_report_text, encoding="utf-8")
     (run_dir / "used_features.txt").write_text("\n".join(features) + "\n", encoding="utf-8")
 
-    split_out = pd.concat([
-        pd.DataFrame({"row_id": train_df["_row_id"].astype(int), "split": "train", "true_label": y_train.to_numpy()}),
-        pd.DataFrame({"row_id": test_df["_row_id"].astype(int), "split": "test", "true_label": y_test.to_numpy()}),
-    ], ignore_index=True)
+    split_out = split_table(train_df, test_df, args.label, args.group_column)
     split_out.to_csv(run_dir / "split.csv", index=False)
 
     metrics = {
@@ -428,6 +341,8 @@ def main():
         "max_samples": args.max_samples,
         "split_file": None if args.split_file is None else str(args.split_file),
         "split_sha256": file_sha256(args.split_file),
+        "split_strategy": "grouped",
+        "grouping": group_summary(train_df, test_df, args.label, args.group_column),
         "shuffle_label": bool(args.shuffle_label),
         "train_metrics": train_metrics,
         "test_metrics": test_metrics,
@@ -470,6 +385,10 @@ def main():
     print("\nCLASSICAL SVM ")
     print(f"Feature set: {feature_set_name} ({len(features)} features)")
     print(f"Samples: {len(all_selected)} | train={len(train_df)} | test={len(test_df)}")
+    print(
+        f"Groups ({args.group_column}): train={train_df[args.group_column].nunique()} "
+        f"| test={test_df[args.group_column].nunique()}"
+    )
     print(f"Kernel: {args.kernel} | C={args.C} | gamma={args.gamma} | scaler={args.scaler}")
     print(f"Test accuracy:          {test_metrics['accuracy']:.4f}")
     print(f"Test balanced accuracy: {test_metrics['balanced_accuracy']:.4f}")

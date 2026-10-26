@@ -175,30 +175,36 @@ def collect_inputs(
             paths.extend(transition_files)
 
     elif method == "multitech":
-        targets = settings.get("targets", ["summary", "expanded", "md_windows"])
+        targets = settings.get("targets", ["summary", "md_windows"])
         if not isinstance(targets, list) or not targets:
             fail("methods.multitech.targets must be a non-empty list.")
-        valid_targets = {"summary", "expanded", "md_windows"}
+        if "expanded" in [str(item) for item in targets]:
+            fail(
+                "The multitech 'expanded' target was removed (cartesian product that leaked "
+                "the site label); use summary and md_windows."
+            )
+        valid_targets = {"summary", "md_windows"}
         unknown = [str(item) for item in targets if str(item) not in valid_targets]
         if unknown:
             fail(f"Unknown multitech targets: {', '.join(unknown)}")
         windows = int(settings.get("md_windows_per_site", 10))
-        if windows <= 0:
-            fail("methods.multitech.md_windows_per_site must be positive.")
+        if windows < 0:
+            fail("methods.multitech.md_windows_per_site must be zero (no cap) or positive.")
 
-        if any(target in targets for target in ["summary", "expanded"]):
+        if "summary" in targets:
+            # DFT is required; TDDFT, CO2RR and MD are joined one to one when present.
+            paths.append(source_results / "dft_summary.csv")
             paths.extend(
                 source_results / name
-                for name in ["tddft_summary.csv", "dft_summary.csv", "co2rr_pathway_summary.csv"]
+                for name in ["tddft_summary.csv", "co2rr_pathway_summary.csv"]
+                if (source_results / name).is_file()
             )
-        if "expanded" in targets:
-            transitions = sorted(source_results.glob("tddft/*/*/transitions.csv"))
-            if not transitions:
-                fail(f"No TDDFT transition files found below: {source_results / 'tddft'}")
-            paths.extend(transitions)
-        if any(target in targets for target in ["summary", "expanded", "md_windows"]):
-            md_files = find_md_summaries(source_results)
-            paths.extend(md_files)
+            try:
+                paths.extend(find_md_summaries(source_results))
+            except FileNotFoundError:
+                pass
+        if "md_windows" in targets:
+            paths.extend(find_md_summaries(source_results))
 
     elif method == "qml_features":
         if ranking_override is not None:
@@ -244,15 +250,23 @@ def build_command(
     if method == "multitech":
         targets = [
             str(item)
-            for item in settings.get("targets", ["summary", "expanded", "md_windows"])
+            for item in settings.get("targets", ["summary", "md_windows"])
         ]
-        return [
+        result = [
             *command,
             "--results-dir", str(source_results),
             "--output-dir", str(run_dir / "multitech"),
             "--targets", *targets,
             "--md-windows-per-site", str(int(settings.get("md_windows_per_site", 10))),
         ]
+        for key, option in [
+            ("block_tau_factor", "--block-tau-factor"),
+            ("min_block_length_fs", "--min-block-length-fs"),
+            ("equilibration_fs", "--equilibration-fs"),
+        ]:
+            if settings.get(key) is not None:
+                result.extend([option, str(float(settings[key]))])
+        return result
 
     if ranking_override is not None:
         ranking = resolve_project_path(ranking_override)
@@ -266,6 +280,9 @@ def build_command(
     default_material = settings.get("default_material")
     if default_material:
         result.extend(["--default-material", str(default_material)])
+    features = settings.get("features")
+    if features:
+        result.extend(["--features", *[str(item) for item in features]])
     return result
 
 

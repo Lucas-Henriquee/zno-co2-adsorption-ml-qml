@@ -1,3 +1,16 @@
+"""Tabulate successful DFT adsorption results of one simulation run.
+
+Only rows with dft_status == ok are used (audit A1), and the exploratory DFT site
+"carbonate" is excluded. Candidates are ranked by the DFT adsorption energy alone
+(most negative first); no composite score is computed.
+
+The former photocatalysis score compared the PBE band gap and the TDDFT "onset"
+with experimental targets (2.40 and 2.20 eV). Both comparisons were invalid:
+PBE Kohn-Sham gaps underestimate the experimental ZnO gap (3.37 eV), and the
+TDDFT descriptors are excitations of the isolated CO2 molecule, not of the
+ZnO/CO2 system. Both are reported for information only.
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -5,15 +18,28 @@ import csv
 import math
 from pathlib import Path
 
-from scripts.common.project_config import RESULTS_DIR, TARGET_ADSORPTION_ENERGY_EV, TARGET_BAND_GAP_EV, TARGET_ONSET_EV
+from scripts.common.project_config import EXPLORATORY_SITES, RESULTS_DIR
+
+TDDFT_COLUMNS = (
+    "co2_isolated_first_excitation_ev",
+    "co2_isolated_onset_ev",
+    "co2_isolated_peak_ev",
+    "co2_isolated_total_f",
+    "trk_sum",
+)
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Rank material/site candidates from DFT and TDDFT descriptors."
+        description="Rank successful material/site DFT results by adsorption energy."
     )
-    parser.add_argument("--results-dir", type=Path, default=RESULTS_DIR)
-    parser.add_argument("--output-dir", type=Path, default=RESULTS_DIR)
+    parser.add_argument(
+        "--results-dir",
+        type=Path,
+        default=RESULTS_DIR,
+        help="Simulation run directory, e.g. results/simulations/<run-id> (default: QML_ZNO_RESULTS_DIR).",
+    )
+    parser.add_argument("--output-dir", type=Path, default=RESULTS_DIR / "analysis")
     return parser.parse_args()
 
 
@@ -41,132 +67,111 @@ def safe_float(value: str | float | int | None) -> float:
         return float("nan")
 
 
-def gaussian_score(value: float, target: float, sigma: float) -> float:
-    if not math.isfinite(value):
-        return 0.0
-    return math.exp(-((value - target) ** 2) / (2.0 * sigma**2))
+def is_ok(row: dict[str, str], status_column: str) -> bool:
+    return str(row.get(status_column, "")).strip().lower() == "ok"
 
 
-def geometry_activation_score(avg_bond: float, oco_angle: float) -> float:
-    if not math.isfinite(avg_bond) or not math.isfinite(oco_angle):
-        return 0.0
-    bond_stretch = max(0.0, avg_bond - 1.16) / 0.20
-    angle_bend = max(0.0, 180.0 - oco_angle) / 40.0
-    return min(1.0, 0.5 * bond_stretch + 0.5 * angle_bend)
+def filter_ok_rows(rows: list[dict[str, str]], status_column: str) -> list[dict[str, str]]:
+    """Successful rows of the classification sites (failed and carbonate rows dropped)."""
+    return [
+        row
+        for row in rows
+        if is_ok(row, status_column) and row.get("site") not in EXPLORATORY_SITES
+    ]
 
 
 def merge_results(
     dft_rows: list[dict[str, str]],
     tddft_rows: list[dict[str, str]],
 ) -> list[dict[str, float | str]]:
+    dft_ok = filter_ok_rows(dft_rows, "dft_status")
     tddft_map: dict[tuple[str, str], dict[str, str]] = {
-        (row["material"], row["site"]): row for row in tddft_rows
+        (row["material"], row["site"]): row for row in filter_ok_rows(tddft_rows, "tddft_status")
     }
 
     merged: list[dict[str, float | str]] = []
-    for dft_row in dft_rows:
+    for dft_row in dft_ok:
         key = (dft_row["material"], dft_row["site"])
         tddft_row = tddft_map.get(key, {})
 
         adsorption_energy = safe_float(dft_row.get("adsorption_energy_ev"))
-        band_gap = safe_float(dft_row.get("adsorbed_band_gap_ev"))
-        onset = safe_float(tddft_row.get("tddft_onset_ev"))
+        if not math.isfinite(adsorption_energy):
+            continue
+        clean_gap = safe_float(dft_row.get("clean_band_gap_gamma_ev"))
+        adsorbed_gap = safe_float(dft_row.get("adsorbed_band_gap_gamma_ev"))
         co_bond_1 = safe_float(dft_row.get("co_bond_1_ang"))
         co_bond_2 = safe_float(dft_row.get("co_bond_2_ang"))
-        oco_angle = safe_float(dft_row.get("oco_angle_deg"))
 
-        avg_bond = (co_bond_1 + co_bond_2) / 2.0
-        adsorption_score = gaussian_score(
-            value=adsorption_energy,
-            target=TARGET_ADSORPTION_ENERGY_EV,
-            sigma=0.50,
-        )
-        band_gap_score = gaussian_score(
-            value=band_gap,
-            target=TARGET_BAND_GAP_EV,
-            sigma=0.70,
-        )
-        onset_score = gaussian_score(
-            value=onset,
-            target=TARGET_ONSET_EV,
-            sigma=0.80,
-        )
-        activation_score = geometry_activation_score(avg_bond=avg_bond, oco_angle=oco_angle)
+        row: dict[str, float | str] = {
+            "material": dft_row["material"],
+            "site": dft_row["site"],
+            "final_state": dft_row.get("final_state", ""),
+            "adsorption_energy_ev": adsorption_energy,
+            # PBE Kohn-Sham gaps on a Gamma-centred grid; not comparable to 3.37 eV.
+            "clean_band_gap_gamma_ev": clean_gap,
+            "adsorbed_band_gap_gamma_ev": adsorbed_gap,
+            "pbe_gap_change_ev": adsorbed_gap - clean_gap,
+            "co_bond_avg_ang": (co_bond_1 + co_bond_2) / 2.0,
+            "oco_angle_deg": safe_float(dft_row.get("oco_angle_deg")),
+            "c_surface_distance_ang": safe_float(dft_row.get("c_surface_distance_ang")),
+            "c_min_slab_distance_ang": safe_float(dft_row.get("c_min_slab_distance_ang")),
+            "o_min_metal_distance_ang": safe_float(dft_row.get("o_min_metal_distance_ang")),
+        }
+        for column in TDDFT_COLUMNS:
+            row[column] = safe_float(tddft_row.get(column))
+        merged.append(row)
 
-        total_score = (
-            0.35 * adsorption_score
-            + 0.25 * band_gap_score
-            + 0.25 * onset_score
-            + 0.15 * activation_score
-        )
-
-        merged.append(
-            {
-                "material": dft_row["material"],
-                "site": dft_row["site"],
-                "adsorption_energy_ev": adsorption_energy,
-                "adsorbed_band_gap_ev": band_gap,
-                "tddft_onset_ev": onset,
-                "co_bond_avg_ang": avg_bond,
-                "oco_angle_deg": oco_angle,
-                "adsorption_score": adsorption_score,
-                "band_gap_score": band_gap_score,
-                "onset_score": onset_score,
-                "activation_score": activation_score,
-                "total_score": total_score,
-            }
-        )
-
-    merged.sort(key=lambda row: float(row["total_score"]), reverse=True)
+    merged.sort(key=lambda item: float(item["adsorption_energy_ev"]))
+    for rank, row in enumerate(merged, start=1):
+        row["rank_by_adsorption_energy"] = rank
     return merged
 
 
 def write_ranked_csv(rows: list[dict[str, float | str]], path: Path) -> None:
     if not rows:
-        raise SystemExit("No rows to write.")
+        raise SystemExit("No successful DFT rows (dft_status == ok) to write.")
     with path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=list(rows[0].keys()))
         writer.writeheader()
         writer.writerows(rows)
 
 
+def _fmt(value: float | str) -> str:
+    number = safe_float(value) if not isinstance(value, float) else value
+    return f"{number:.4f}" if math.isfinite(number) else "n/a"
+
+
 def write_markdown_report(rows: list[dict[str, float | str]], path: Path) -> None:
     if not rows:
         raise SystemExit("No rows to report.")
 
-    best_by_material: dict[str, dict[str, float | str]] = {}
-    for row in rows:
-        material = str(row["material"])
-        if material not in best_by_material:
-            best_by_material[material] = row
-
     lines: list[str] = []
-    lines.append("# DFT + TDDFT Screening Report")
+    lines.append("# DFT Adsorption Summary")
     lines.append("")
-    lines.append("## Top 3 Candidates")
+    lines.append(
+        "Only successful DFT rows (dft_status == ok) of the classification sites are "
+        "listed; the exploratory carbonate start is excluded. Ranking is by adsorption "
+        "energy only (most negative first)."
+    )
     lines.append("")
-    for idx, row in enumerate(rows[:3], start=1):
+    lines.append(
+        "Band gaps are PBE Kohn-Sham gaps on a Gamma-centred grid. PBE underestimates "
+        "the experimental ZnO gap (3.37 eV); use them only to compare sites. TDDFT "
+        "values describe the isolated CO2 molecule and are not photocatalyst absorption "
+        "energies."
+    )
+    lines.append("")
+    lines.append(
+        "| Rank | Material | Site | E_ads (eV) | PBE gap clean (eV) | PBE gap adsorbed (eV) "
+        "| PBE gap change (eV) | O-C-O (deg) |"
+    )
+    lines.append("|---:|---|---|---:|---:|---:|---:|---:|")
+    for row in rows:
         lines.append(
-            (
-                f"{idx}. {row['material']} @ {row['site']} "
-                f"(score={float(row['total_score']):.4f}, "
-                f"E_ads={float(row['adsorption_energy_ev']):.4f} eV, "
-                f"Eg={float(row['adsorbed_band_gap_ev']):.4f} eV, "
-                f"onset={float(row['tddft_onset_ev']):.4f} eV)"
-            )
-        )
-    lines.append("")
-    lines.append("## Best Site Per Oxide")
-    lines.append("")
-    for material, row in best_by_material.items():
-        lines.append(
-            (
-                f"- {material}: {row['site']} "
-                f"(score={float(row['total_score']):.4f}, "
-                f"E_ads={float(row['adsorption_energy_ev']):.4f} eV, "
-                f"Eg={float(row['adsorbed_band_gap_ev']):.4f} eV, "
-                f"onset={float(row['tddft_onset_ev']):.4f} eV)"
-            )
+            f"| {row['rank_by_adsorption_energy']} | {row['material']} | {row['site']} "
+            f"| {_fmt(row['adsorption_energy_ev'])} | {_fmt(row['clean_band_gap_gamma_ev'])} "
+            f"| {_fmt(row['adsorbed_band_gap_gamma_ev'])} | {_fmt(row['pbe_gap_change_ev'])} "
+            f"| {_fmt(row['oco_angle_deg'])} |"
         )
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
@@ -182,7 +187,11 @@ def main() -> None:
     report_md = output_dir / "ranking_report.md"
 
     dft_rows = read_csv_rows(dft_csv)
-    tddft_rows = read_csv_rows(tddft_csv)
+    if tddft_csv.is_file():
+        tddft_rows = read_csv_rows(tddft_csv)
+    else:
+        print(f"[analysis] {tddft_csv} not found; TDDFT columns left empty.")
+        tddft_rows = []
     merged_rows = merge_results(dft_rows, tddft_rows)
 
     write_ranked_csv(merged_rows, ranked_csv)

@@ -22,11 +22,9 @@ BASELINE = "4a2ff4a"
 # run_neb, run_tddft, run_co2rr_pathways) are deliberately excluded; their physics is
 # covered by tests/test_geometry.py, tests/test_dft_*.py, tests/test_md_run.py,
 # tests/test_neb_*.py, tests/test_tddft_run.py and tests/test_co2rr_*.py.
+# The SVM, QSVM, IBM QSVM and benchmark scripts are excluded too: they now split
+# and cross-validate by trajectory group; see tests/test_models_grouped_split.py.
 SOURCES = {
-    "classical_svm_baseline.py": "scripts/models/ml/classical_svm_baseline.py",
-    "qsvm_baseline.py": "scripts/models/qml/qsvm_baseline.py",
-    "qsvm_ibm_hardware.py": "scripts/models/qml_ibm/qsvm_ibm_hardware.py",
-    "run_benchmarks.py": "scripts/models/benchmarks/run_benchmarks.py",
 }
 
 

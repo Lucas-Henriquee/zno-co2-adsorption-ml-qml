@@ -1,41 +1,17 @@
-import pandas as pd
+import argparse
 from pathlib import Path
 
-FEATURE_SETS_QSVM = {
-    "md3": [
-        "feature_md_window_c_surface_distance_mean_a",
-        "feature_md_window_c_surface_distance_std_a",
-        "feature_md_window_mean_oco_angle_deg",
-    ],
-    "dynamic4": [
-        "feature_tddft_transition_energy_ev",
-        "feature_tddft_transition_oscillator_strength",
-        "feature_md_window_c_surface_distance_mean_a",
-        "feature_md_window_c_surface_distance_std_a",
-    ],
-    "dynamic6": [
-        "feature_tddft_transition_energy_ev",
-        "feature_tddft_transition_oscillator_strength",
-        "feature_tddft_transition_delta_from_peak_ev",
-        "feature_md_window_c_surface_distance_mean_a",
-        "feature_md_window_c_surface_distance_std_a",
-        "feature_md_window_mean_oco_angle_deg",
-    ],
-    "all12": [
-        "feature_tddft_transition_energy_ev",
-        "feature_tddft_transition_oscillator_strength",
-        "feature_tddft_transition_delta_from_peak_ev",
-        "feature_dft_adsorption_energy_ev",
-        "feature_dft_c_surface_distance_a",
-        "feature_dft_gap_change_ev",
-        "feature_co2rr_deltaG_CO2_to_COOH_ev",
-        "feature_co2rr_deltaG_COOH_to_CO_ev",
-        "feature_co2rr_limiting_potential_v",
-        "feature_md_window_c_surface_distance_mean_a",
-        "feature_md_window_c_surface_distance_std_a",
-        "feature_md_window_mean_oco_angle_deg",
-    ],
-}
+import pandas as pd
+
+from scripts.common.project_config import RESULTS_DIR
+from scripts.models.benchmarks.run_benchmarks import FEATURE_SETS as FEATURE_SETS_QSVM
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Number of features and qubits per QSVM feature set.")
+    parser.add_argument("--output", type=Path, default=RESULTS_DIR / "feature_qubit_table.csv")
+    return parser.parse_args()
+
 
 def build_table(feature_sets: dict[str, list[str]]) -> pd.DataFrame:
     rows = []
@@ -50,9 +26,10 @@ def build_table(feature_sets: dict[str, list[str]]) -> pd.DataFrame:
     return pd.DataFrame(rows).sort_values("n_features").reset_index(drop=True)
 
 def main():
+    args = parse_args()
     df = build_table(FEATURE_SETS_QSVM)
 
-    output_csv = Path("results/feature_qubit_table.csv")
+    output_csv = args.output
     output_csv.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(output_csv, index=False)
 
