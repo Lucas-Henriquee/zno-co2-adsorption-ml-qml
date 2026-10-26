@@ -19,11 +19,10 @@ from scripts.workflows import run_simulations as simulations
 ROOT = Path(__file__).resolve().parents[1]
 BASELINE = "4a2ff4a"
 # The simulation scripts corrected by the IC audit (build_geometries, run_dft, run_md,
-# run_neb, run_tddft) are deliberately excluded; their physics is covered by
-# tests/test_geometry.py, tests/test_dft_*.py, tests/test_md_run.py, tests/test_neb_*.py
-# and tests/test_tddft_run.py.
+# run_neb, run_tddft, run_co2rr_pathways) are deliberately excluded; their physics is
+# covered by tests/test_geometry.py, tests/test_dft_*.py, tests/test_md_run.py,
+# tests/test_neb_*.py, tests/test_tddft_run.py and tests/test_co2rr_*.py.
 SOURCES = {
-    "run_co2rr_pathways.py": "scripts/simulations/co2rr/run_co2rr_pathways.py",
     "classical_svm_baseline.py": "scripts/models/ml/classical_svm_baseline.py",
     "qsvm_baseline.py": "scripts/models/qml/qsvm_baseline.py",
     "qsvm_ibm_hardware.py": "scripts/models/qml_ibm/qsvm_ibm_hardware.py",

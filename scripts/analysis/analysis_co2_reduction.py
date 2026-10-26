@@ -205,29 +205,42 @@ def build_figure_tables(rows: list[dict[str, str | float]]) -> dict[str, list[di
     }
 
 
-def build_pathway_template(rows: list[dict[str, str | float]]) -> list[dict[str, str | float]]:
+PATHWAY_BASE_COLUMNS = ("pathway_status", "energy_basis", "profile", "limiting_step", "limiting_potential_v")
+
+
+def pathway_columns(pathway_rows: list[dict[str, str]]) -> list[str]:
+    """Columns of co2rr_pathway_summary.csv in file order (dG_* or dE_* as written)."""
+    columns: list[str] = list(PATHWAY_BASE_COLUMNS)
+    for row in pathway_rows:
+        for key in row:
+            if key not in ("material", "site", "notes") and key not in columns:
+                columns.append(key)
+    return columns
+
+
+def numeric_or_text(value: str | None) -> str | float:
+    number = safe_float(value)
+    if math.isfinite(number):
+        return number
+    text = "" if value is None else str(value).strip()
+    return text if text and text.lower() != "nan" else float("nan")
+
+
+def build_pathway_template(
+    rows: list[dict[str, str | float]],
+    columns: list[str],
+) -> list[dict[str, str | float]]:
     template_rows: list[dict[str, str | float]] = []
     for row in rows:
-        template_rows.append(
-            {
-                "material": row["material"],
-                "site": row["site"],
-                "quality_flag": row["quality_flag"],
-                "E_clean_slab_ev": float("nan"),
-                "E_CO2_star_ev": float("nan"),
-                "E_COOH_star_ev": float("nan"),
-                "E_CO_star_ev": float("nan"),
-                "E_O_star_ev": float("nan"),
-                "E_products_ev": float("nan"),
-                "deltaG_CO2_to_COOH_ev": float("nan"),
-                "deltaG_COOH_to_CO_ev": float("nan"),
-                "deltaG_CO_desorption_ev": float("nan"),
-                "deltaG_O_removal_ev": float("nan"),
-                "limiting_step": "",
-                "limiting_potential_v": float("nan"),
-                "notes": "",
-            }
-        )
+        template_row: dict[str, str | float] = {
+            "material": row["material"],
+            "site": row["site"],
+            "quality_flag": row["quality_flag"],
+        }
+        for column in columns:
+            template_row[column] = "" if column in ("pathway_status", "energy_basis", "profile", "limiting_step") else float("nan")
+        template_row["notes"] = ""
+        template_rows.append(template_row)
     return template_rows
 
 
@@ -235,8 +248,15 @@ def build_pathway_table(
     rows: list[dict[str, str | float]],
     pathway_rows: list[dict[str, str]],
 ) -> list[dict[str, str | float]]:
-    pathway_map = {(row["material"], row["site"]): row for row in pathway_rows}
-    table_rows = build_pathway_template(rows)
+    # Summaries without energy_basis predate the CHE fix (O* summed into the profile,
+    # dE labelled dG, wrong limiting potential) and are not used.
+    current = [row for row in pathway_rows if "energy_basis" in row]
+    legacy = len(pathway_rows) - len(current)
+    if legacy:
+        print(f"[co2-analysis] ignored {legacy} pathway row(s) with the old schema (no energy_basis column)")
+    pathway_map = {(row["material"], row["site"]): row for row in current}
+    columns = pathway_columns(current)
+    table_rows = build_pathway_template(rows, columns)
 
     for table_row in table_rows:
         key = (str(table_row["material"]), str(table_row["site"]))
@@ -244,32 +264,23 @@ def build_pathway_table(
         if not pathway:
             continue
 
-        status = str(pathway.get("pathway_status", ""))
-        if status != "ok":
+        table_row["pathway_status"] = str(pathway.get("pathway_status", "")).strip()
+        table_row["energy_basis"] = str(pathway.get("energy_basis", "")).strip()
+        if table_row["pathway_status"] != "ok":
             message = str(pathway.get("error_message", "")).strip()
             if message:
-                table_row["notes"] = f"pathway_failed: {message}"
+                table_row["notes"] = f"pathway_{table_row['pathway_status']}: {message}"
             continue
 
-        table_row["E_clean_slab_ev"] = safe_float(pathway.get("E_clean_slab_ev"))
-        table_row["E_CO2_star_ev"] = safe_float(pathway.get("E_CO2_star_ev"))
-        table_row["E_COOH_star_ev"] = safe_float(pathway.get("E_COOH_star_ev"))
-        table_row["E_CO_star_ev"] = safe_float(pathway.get("E_CO_star_ev"))
-        table_row["E_O_star_ev"] = safe_float(pathway.get("E_O_star_ev"))
-        table_row["E_products_ev"] = safe_float(pathway.get("E_products_ev"))
-        table_row["deltaG_CO2_to_COOH_ev"] = safe_float(pathway.get("deltaG_CO2_to_COOH_ev"))
-        table_row["deltaG_COOH_to_CO_ev"] = safe_float(pathway.get("deltaG_COOH_to_CO_ev"))
-        table_row["deltaG_CO_desorption_ev"] = safe_float(pathway.get("deltaG_CO_desorption_ev"))
-        table_row["deltaG_O_removal_ev"] = safe_float(pathway.get("deltaG_O_removal_ev"))
-        table_row["limiting_step"] = str(pathway.get("limiting_step", "")).strip()
-        table_row["limiting_potential_v"] = safe_float(pathway.get("limiting_potential_v"))
-
+        for column in columns:
+            if column in ("pathway_status", "energy_basis"):
+                continue
+            table_row[column] = numeric_or_text(pathway.get(column))
         note_chunks = [
             str(pathway.get("notes", "")).strip(),
-            str(pathway.get("profile_mismatch", "")).strip(),
+            str(pathway.get("geometry_flags", "")).strip(),
         ]
-        note = "; ".join(chunk for chunk in note_chunks if chunk)
-        table_row["notes"] = note
+        table_row["notes"] = "; ".join(chunk for chunk in note_chunks if chunk)
 
     return table_rows
 
@@ -311,8 +322,12 @@ def write_manifest(path: Path) -> None:
         "## Mechanistic Table Template",
         "- File: `co2rr_pathway_template.csv`",
         "- Auto-filled from `co2rr_pathway_summary.csv` when pathway simulations exist.",
-        "- Includes DFT energies for CO2RR intermediates per site (COOH*, CO*, O*), stepwise ΔG, and limiting potential.",
-        "- Use this as the core publication table for mechanistic CO2-reduction energetics.",
+        "- Pathway: * + CO2(g) -> COOH* -> CO* + H2O(g) -> * + CO(g), computational hydrogen electrode.",
+        "- `energy_basis` = `free_energy_CHE`: step columns are `dG_*` (ZPE, heat capacity, -TS; slab frozen).",
+        "- `energy_basis` = `electronic_energies_only`: step columns are `dE_*`; these are not free energies.",
+        "- `limiting_potential_v` = -max(PCET steps at U = 0)/e in V vs RHE; CO desorption is a separate chemical step.",
+        "- `*_CO2_adsorption_ev` (* + CO2(g) -> CO2*) is a reference step, not part of the profile.",
+        "- `*_O_formation_from_H2O_ev`, if present, is a separate quantity and not part of the CO2 -> CO profile.",
     ]
     path.write_text("\n".join(lines), encoding="utf-8")
 

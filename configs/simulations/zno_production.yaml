@@ -74,6 +74,27 @@ methods:
     ecut_ev: 500.0
     kpoints: [2, 3, 1]
     molecule_box_vacuum_angstrom: 8.0
+    # Thermochemistry (read by run_co2rr_pathways.py from this file; CLI flags override).
+    # vibrations: false gives electronic energies only and dE_* columns, never dG_*.
+    vibrations: true
+    vibration_displacement_angstrom: 0.01
+    temperature_kelvin: 298.15
+    electrode_potential_v_rhe: 0.0
+    # H2O at 0.035 bar is in equilibrium with liquid water at 298 K (Peterson et al. 2010).
+    partial_pressures_bar:
+      CO2: 1.0
+      CO: 1.0
+      H2: 1.0
+      H2O: 0.035
+    # Additive corrections (eV) to G of gas-phase CO2 and CO for the PBE error.
+    # Kept at zero: literature values are functional- and setup-specific and must be
+    # verified for PBE/GPAW before use.
+    gas_corrections_ev:
+      CO2: 0.0
+      CO: 0.0
+    # O* is not part of the CO2 -> CO pathway; when true it is computed and reported
+    # only as the separate quantity "O* formation from H2O".
+    o_star_reference: false
 
   md:
     # The MD uses the GPAW profile (smearing, mixer, maxiter) of the DFT run for each
