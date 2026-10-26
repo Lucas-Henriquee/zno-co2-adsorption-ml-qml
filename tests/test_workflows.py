@@ -162,7 +162,10 @@ class OrganizationTests(unittest.TestCase):
                 if isinstance(expected, tuple):
                     expected = list(expected)
                 self.assertEqual(config["methods"][method][field], expected, variable)
-        self.assertEqual(config["execution"]["mpi"]["processes"], values["MPI_CORES"])
+        # The notebook's MPI_CORES = 10 does not divide the 6 k-points of the 2x1 cell
+        # (audit D11); the YAML deliberately uses 6 ranks.
+        self.assertEqual(values["MPI_CORES"], 10)
+        self.assertEqual(config["execution"]["mpi"]["processes"], 6)
         self.assertNotIn("random_seed", config["methods"]["md"])
         self.assertEqual(config["execution"]["mpi"]["extra_args"], ["--mca", "btl", "self,vader"])
 

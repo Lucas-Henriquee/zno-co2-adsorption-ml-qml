@@ -20,7 +20,9 @@ execution:
   omp_num_threads: 1
   mpi:
     enabled: true
-    processes: 10
+    # 6 ranks: the 2x1 cell with k 2x3x1 and symmetry off has 6 k-points (one per rank),
+    # and the lab PC has 6 performance cores.
+    processes: 6
     launcher: mpiexec
     extra_args:
       - --mca
@@ -42,6 +44,11 @@ methods:
     ecut_ev: 500.0
     kpoints: [2, 3, 1]
     co2_box_vacuum_angstrom: 8.0
+    # Extra blocks of max_steps BFGS steps, continued from the last geometry, before a
+    # relaxation that hit the step limit is declared failed.
+    relax_extra_blocks: 1
+    # Optional SCF force criterion in eV/Ang (e.g. 0.01); null keeps GPAW's defaults.
+    scf_force_convergence: null
 
   tddft:
     max_transitions: 50
