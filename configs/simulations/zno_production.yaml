@@ -50,9 +50,23 @@ methods:
     # Optional SCF force criterion in eV/Ang (e.g. 0.01); null keeps GPAW's defaults.
     scf_force_convergence: null
 
+  # LrTDDFT spectrum of the CO2 molecule in its adsorbed (DFT-optimised)
+  # geometry, isolated in a non-periodic box WITHOUT the slab (fd mode, Gamma).
+  # It is not the optical response of ZnO-CO2; do not compare it with a
+  # photocatalyst onset target. All energies are written in eV.
   tddft:
+    # Lowest transitions kept after diagonalisation (TRK uses all of them).
     max_transitions: 50
+    # Onset = lowest transition with oscillator strength f >= threshold.
     oscillator_strength_threshold: 0.001
+    grid_spacing_angstrom: 0.25
+    box_size_angstrom: 18.0
+    smearing_width_ev: 0.10
+    # CO2: 8 occupied bands + 60 unoccupied.
+    nbands: 68
+    converged_bands: 68
+    # Maximal Kohn-Sham transition energy in the LrTDDFT basis.
+    energy_window_ev: 30.0
 
   co2rr:
     fmax_ev_per_angstrom: 0.05

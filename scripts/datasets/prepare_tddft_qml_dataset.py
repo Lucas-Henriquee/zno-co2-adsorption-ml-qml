@@ -17,7 +17,10 @@ SITE_LABELS = {
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Build summary and transition-level TDDFT datasets for modeling."
+        description=(
+            "Build summary and transition-level datasets from the LrTDDFT spectrum of the adsorbed CO2 "
+            "molecule isolated in a box (not the optical response of the ZnO-CO2 system)."
+        )
     )
     parser.add_argument("--summary", type=Path, required=True)
     parser.add_argument("--tddft-dir", type=Path, default=None)
@@ -37,9 +40,9 @@ def read_summary(path: Path) -> pd.DataFrame:
         "material",
         "site",
         "tddft_status",
-        "tddft_total_oscillator_strength",
-        "tddft_onset_ev",
-        "tddft_peak_energy_ev",
+        "co2_isolated_total_f",
+        "co2_isolated_onset_ev",
+        "co2_isolated_peak_ev",
     }
     missing = sorted(required.difference(df.columns))
     if missing:
@@ -61,18 +64,18 @@ def read_summary(path: Path) -> pd.DataFrame:
 def build_summary_dataset(summary: pd.DataFrame) -> pd.DataFrame:
     data = summary.copy()
 
-    data["feature_1_total_oscillator_strength"] = data["tddft_total_oscillator_strength"]
-    data["feature_2_onset_ev"] = data["tddft_onset_ev"]
-    data["feature_3_peak_energy_ev"] = data["tddft_peak_energy_ev"]
+    data["feature_1_co2_isolated_total_f"] = data["co2_isolated_total_f"]
+    data["feature_2_co2_isolated_onset_ev"] = data["co2_isolated_onset_ev"]
+    data["feature_3_co2_isolated_peak_ev"] = data["co2_isolated_peak_ev"]
 
     cols = [
         "material",
         "site",
         "label_site",
         "label_id",
-        "feature_1_total_oscillator_strength",
-        "feature_2_onset_ev",
-        "feature_3_peak_energy_ev",
+        "feature_1_co2_isolated_total_f",
+        "feature_2_co2_isolated_onset_ev",
+        "feature_3_co2_isolated_peak_ev",
     ]
 
     return data[cols].sort_values(["material", "site"])
@@ -103,7 +106,7 @@ def build_transitions_dataset(summary: pd.DataFrame, transitions: pd.DataFrame) 
     summary_cols = [
         "material",
         "site",
-        "tddft_peak_energy_ev",
+        "co2_isolated_peak_ev",
     ]
 
     data = transitions.merge(
@@ -122,7 +125,7 @@ def build_transitions_dataset(summary: pd.DataFrame, transitions: pd.DataFrame) 
 
     data["feature_1_energy_ev"] = data["energy_ev"]
     data["feature_2_oscillator_strength"] = data["oscillator_strength"]
-    data["feature_3_delta_from_peak_ev"] = (data["energy_ev"] - data["tddft_peak_energy_ev"])
+    data["feature_3_delta_from_peak_ev"] = (data["energy_ev"] - data["co2_isolated_peak_ev"])
 
     cols = [
         "material",
