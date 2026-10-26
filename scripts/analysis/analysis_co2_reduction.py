@@ -11,7 +11,6 @@ from scripts.common.project_config import RESULTS_DIR
 ANALYSIS_DIR = RESULTS_DIR / "analysis"
 BASELINE_CO_BOND_ANG = 1.16
 TARGET_ADSORPTION_EV = -0.70
-TARGET_ONSET_EV = 2.20
 
 
 def parse_args() -> argparse.Namespace:
@@ -85,29 +84,26 @@ def merge_dft_tddft(
         oco_angle = safe_float(dft_row.get("oco_angle_deg"))
         c_surface_distance = safe_float(dft_row.get("c_surface_distance_ang"))
 
-        onset = safe_float(tddft_row.get("tddft_onset_ev"))
-        peak_energy = safe_float(tddft_row.get("tddft_peak_energy_ev"))
-        peak_osc = safe_float(tddft_row.get("tddft_peak_oscillator_strength"))
-        total_osc = safe_float(tddft_row.get("tddft_total_oscillator_strength"))
-        num_transitions = safe_float(tddft_row.get("tddft_num_transitions"))
+        # TDDFT is the spectrum of the isolated CO2 in its adsorbed geometry, not the
+        # optical response of ZnO-CO2, so it is reported but not scored.
+        onset = safe_float(tddft_row.get("co2_isolated_onset_ev"))
+        peak_energy = safe_float(tddft_row.get("co2_isolated_peak_ev"))
+        peak_osc = safe_float(tddft_row.get("co2_isolated_peak_f"))
+        total_osc = safe_float(tddft_row.get("co2_isolated_total_f"))
+        num_transitions = safe_float(tddft_row.get("co2_isolated_num_transitions"))
 
         co_bond_avg = (co_bond_1 + co_bond_2) / 2.0 if math.isfinite(co_bond_1) and math.isfinite(co_bond_2) else float("nan")
         co_bond_stretch = co_bond_avg - BASELINE_CO_BOND_ANG if math.isfinite(co_bond_avg) else float("nan")
         oco_bend = 180.0 - oco_angle if math.isfinite(oco_angle) else float("nan")
 
         adsorption_score = gaussian_score(adsorption_energy, TARGET_ADSORPTION_EV, sigma=0.50)
-        optical_score = gaussian_score(onset, TARGET_ONSET_EV, sigma=0.80)
         activation_score = clamp01(
             0.5 * max(0.0, (co_bond_stretch if math.isfinite(co_bond_stretch) else 0.0) / 0.20)
             + 0.5 * max(0.0, (oco_bend if math.isfinite(oco_bend) else 0.0) / 40.0)
         )
 
-        if dft_status == "ok" and tddft_status == "ok":
-            reduction_proxy_score = (
-                0.45 * adsorption_score
-                + 0.35 * activation_score
-                + 0.20 * optical_score
-            )
+        if dft_status == "ok" and site != "carbonate":
+            reduction_proxy_score = (0.45 * adsorption_score + 0.35 * activation_score) / 0.80
             quality_flag = "ok"
         else:
             reduction_proxy_score = float("nan")
@@ -127,14 +123,13 @@ def merge_dft_tddft(
                 "oco_angle_deg": oco_angle,
                 "oco_bend_deg": oco_bend,
                 "c_surface_distance_ang": c_surface_distance,
-                "tddft_onset_ev": onset,
-                "tddft_peak_energy_ev": peak_energy,
-                "tddft_peak_oscillator_strength": peak_osc,
-                "tddft_total_oscillator_strength": total_osc,
-                "tddft_num_transitions": num_transitions,
+                "co2_isolated_onset_ev": onset,
+                "co2_isolated_peak_ev": peak_energy,
+                "co2_isolated_peak_f": peak_osc,
+                "co2_isolated_total_f": total_osc,
+                "co2_isolated_num_transitions": num_transitions,
                 "adsorption_score": adsorption_score,
                 "activation_score": activation_score,
-                "optical_score": optical_score,
                 "reduction_proxy_score": reduction_proxy_score,
                 "quality_flag": quality_flag,
             }
@@ -178,9 +173,9 @@ def build_figure_tables(rows: list[dict[str, str | float]]) -> dict[str, list[di
             "material": row["material"],
             "site": row["site"],
             "adsorption_energy_ev": row["adsorption_energy_ev"],
-            "tddft_onset_ev": row["tddft_onset_ev"],
-            "tddft_peak_energy_ev": row["tddft_peak_energy_ev"],
-            "tddft_peak_oscillator_strength": row["tddft_peak_oscillator_strength"],
+            "co2_isolated_onset_ev": row["co2_isolated_onset_ev"],
+            "co2_isolated_peak_ev": row["co2_isolated_peak_ev"],
+            "co2_isolated_peak_f": row["co2_isolated_peak_f"],
             "reduction_proxy_score": row["reduction_proxy_score"],
         }
         for row in rows
@@ -301,8 +296,9 @@ def write_manifest(path: Path) -> None:
         "",
         "## Figure 3: Photo-Thermo Map",
         "- Input: `figure_photo_thermo_map.csv`",
-        "- Axes: x=`adsorption_energy_ev`, y=`tddft_onset_ev`, color=`material`, marker=`site`",
-        "- Goal: Joint view of adsorption and optical response suitability with site-level markers.",
+        "- Axes: x=`adsorption_energy_ev`, y=`co2_isolated_onset_ev`, color=`material`, marker=`site`",
+        "- Goal: Adsorption energy next to the LrTDDFT onset of the isolated CO2 in its adsorbed geometry",
+        "  (not the optical response of the ZnO-CO2 system; not compared with any photocatalyst target).",
         "",
         "## Figure 4: Site Ranking Bar Chart",
         "- Input: `figure_site_ranking.csv`",
@@ -316,7 +312,7 @@ def write_manifest(path: Path) -> None:
         "",
         "## Primary Table Schema",
         "- File: `co2_reduction_table.csv`",
-        "- Required columns: material, site, adsorption_energy_ev, co_bond_avg_ang, oco_angle_deg, tddft_onset_ev, tddft_peak_energy_ev, reduction_proxy_score, quality_flag",
+        "- Required columns: material, site, adsorption_energy_ev, co_bond_avg_ang, oco_angle_deg, co2_isolated_onset_ev, co2_isolated_peak_ev, reduction_proxy_score, quality_flag",
         "- Include units in paper table caption: eV and Angstrom.",
         "",
         "## Mechanistic Table Template",
