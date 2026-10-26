@@ -298,6 +298,7 @@ def build_commands(
             "--ecut", str(positive_float(settings, "ecut_ev", method)),
             "--kpts", *map(str, kpoints),
             "--molecule-box-vacuum", str(positive_float(settings, "molecule_box_vacuum_angstrom", method)),
+            "--config", config["_config_path"],
         ]]
 
     if method == "md":
