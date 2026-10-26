@@ -14,7 +14,7 @@ Every row is one independent sample (audit findings D1 and M3):
 
 The former ``expanded`` target (TDDFT transitions x MD windows x per-site DFT and
 CO2RR constants) was a cartesian product that leaked the site label and is removed.
-The exploratory DFT site ``carbonate`` is excluded from every dataset.
+The exploratory DFT sites (``carbonate``, ``tridentate``) are excluded from every dataset.
 """
 
 from __future__ import annotations
@@ -264,7 +264,7 @@ def save_dataset(df: pd.DataFrame, path: Path, columns: list[str]) -> None:
 
 
 def load_dft_features(results_dir: Path) -> pd.DataFrame:
-    """One row per successful DFT calculation, without the exploratory carbonate site.
+    """One row per successful DFT calculation, without the exploratory sites.
 
     Band gaps are PBE Kohn-Sham gaps on a Gamma-centred grid (*_band_gap_gamma_ev).
     They underestimate the experimental ZnO gap (3.37 eV) and are used only as a

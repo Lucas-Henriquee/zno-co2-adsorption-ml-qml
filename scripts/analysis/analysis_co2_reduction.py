@@ -5,7 +5,7 @@ import csv
 import math
 from pathlib import Path
 
-from scripts.common.project_config import RESULTS_DIR
+from scripts.common.project_config import EXPLORATORY_SITES, RESULTS_DIR
 
 
 ANALYSIS_DIR = RESULTS_DIR / "analysis"
@@ -102,7 +102,7 @@ def merge_dft_tddft(
             + 0.5 * max(0.0, (oco_bend if math.isfinite(oco_bend) else 0.0) / 40.0)
         )
 
-        if dft_status == "ok" and site != "carbonate":
+        if dft_status == "ok" and site not in EXPLORATORY_SITES:
             reduction_proxy_score = (0.45 * adsorption_score + 0.35 * activation_score) / 0.80
             quality_flag = "ok"
         else:

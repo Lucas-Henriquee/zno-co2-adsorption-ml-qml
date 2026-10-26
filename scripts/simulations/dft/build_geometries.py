@@ -124,6 +124,7 @@ def select_adsorption_sites(slab, metal_symbol: str) -> dict[str, np.ndarray]:
         "top_oxygen": oxygen_site,
         "bridge": bridge_site,
         "carbonate": oxygen_site.copy(),
+        "tridentate": oxygen_site.copy(),
     }
 
 
@@ -137,6 +138,14 @@ def create_co2(site_name: str):
         dx = CARBONATE_CO_BOND_ANGSTROM * np.sin(half_angle)
         dz = CARBONATE_CO_BOND_ANGSTROM * np.cos(half_angle)
         return Atoms("OCO", positions=[(-dx, 0.0, dz), (0.0, 0.0, 0.0), (dx, 0.0, dz)])
+
+    if site_name == "tridentate":
+        # Same bent O-C-O in the yz plane, along [0001], so each O points to one of the two Zn
+        # that neighbour the surface O along the Zn-O dimer rows.
+        half_angle = np.radians(CARBONATE_OCO_ANGLE_DEG / 2.0)
+        dy = CARBONATE_CO_BOND_ANGSTROM * np.sin(half_angle)
+        dz = CARBONATE_CO_BOND_ANGSTROM * np.cos(half_angle)
+        return Atoms("OCO", positions=[(0.0, -dy, dz), (0.0, 0.0, 0.0), (0.0, dy, dz)])
 
     co2 = Atoms("OCO", positions=[(-1.16, 0.0, 0.0), (0.0, 0.0, 0.0), (1.16, 0.0, 0.0)])
     if site_name == "top_oxygen":

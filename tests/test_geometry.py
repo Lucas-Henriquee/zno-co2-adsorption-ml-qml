@@ -66,6 +66,29 @@ class ZnOGeometryTests(unittest.TestCase):
         self.assertAlmostEqual(distances[nearest], 1.70, places=6)
         self.assertGreaterEqual(system.get_all_distances(mic=True)[[o1, o2], :len(slab)].min(), 1.8)
 
+    def test_tridentate_start_lies_along_0001_towards_the_zn_neighbours(self):
+        from scripts.simulations.dft import run_dft
+
+        slab = geometry.build_slab("ZnO")
+        sites = geometry.select_adsorption_sites(slab, "Zn")
+        system = geometry.add_co2_to_site(slab, "tridentate", sites["tridentate"])
+        o1, c, o2 = len(slab), len(slab) + 1, len(slab) + 2
+        self.assertAlmostEqual(system.get_angle(o1, c, o2), 130.0, places=6)
+        # O-C-O along y = [0001] (5.206 A axis), not along x as in the carbonate start.
+        o_vector = system.get_distance(o1, o2, mic=True, vector=True)
+        self.assertAlmostEqual(o_vector[0], 0.0, places=6)
+        self.assertGreater(abs(o_vector[1]), 2.0)
+        self.assertAlmostEqual(slab.cell.lengths()[1], 5.206, places=3)
+        distances = system.get_all_distances(mic=True)
+        nearest = int(np.argmin(distances[c, :len(slab)]))
+        self.assertEqual(slab[nearest].symbol, "O")
+        self.assertAlmostEqual(distances[c, nearest], 1.55, places=6)
+        # Each terminal O has a surface Zn within 3 A, displaced along y from the anchor O.
+        zn = [i for i in range(len(slab)) if slab[i].symbol == "Zn"]
+        for o in (o1, o2):
+            self.assertLess(distances[o, zn].min(), 3.0)
+        run_dft.check_initial_geometry(system, "tridentate", adsorbate_atoms=3)
+
     def test_carbonate_is_dft_only_and_not_a_default_site(self):
         from scripts.common import project_config
         from scripts.simulations.dft import run_dft
@@ -73,6 +96,8 @@ class ZnOGeometryTests(unittest.TestCase):
         self.assertEqual(project_config.ADSORPTION_SITES, ("top_metal", "top_oxygen", "bridge"))
         self.assertIn("carbonate", project_config.DFT_SITES)
         self.assertEqual(run_dft.validate_inputs(["ZnO"], ["carbonate"]), (["ZnO"], ["carbonate"]))
+        self.assertIn("tridentate", project_config.EXPLORATORY_SITES)
+        self.assertNotIn("tridentate", project_config.ADSORPTION_SITES)
 
 
 if __name__ == "__main__":

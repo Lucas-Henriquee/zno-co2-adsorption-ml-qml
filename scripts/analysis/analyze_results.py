@@ -1,7 +1,7 @@
 """Tabulate successful DFT adsorption results of one simulation run.
 
 Only rows with dft_status == ok are used (audit A1), and the exploratory DFT site
-"carbonate" is excluded. Candidates are ranked by the DFT adsorption energy alone
+"carbonate" and "tridentate" are excluded. Candidates are ranked by the DFT adsorption energy alone
 (most negative first); no composite score is computed.
 
 The former photocatalysis score compared the PBE band gap and the TDDFT "onset"
@@ -72,7 +72,7 @@ def is_ok(row: dict[str, str], status_column: str) -> bool:
 
 
 def filter_ok_rows(rows: list[dict[str, str]], status_column: str) -> list[dict[str, str]]:
-    """Successful rows of the classification sites (failed and carbonate rows dropped)."""
+    """Successful rows of the classification sites (failed and exploratory-site rows dropped)."""
     return [
         row
         for row in rows
@@ -150,7 +150,7 @@ def write_markdown_report(rows: list[dict[str, float | str]], path: Path) -> Non
     lines.append("")
     lines.append(
         "Only successful DFT rows (dft_status == ok) of the classification sites are "
-        "listed; the exploratory carbonate start is excluded. Ranking is by adsorption "
+        "listed; the exploratory carbonate/tridentate starts are excluded. Ranking is by adsorption "
         "energy only (most negative first)."
     )
     lines.append("")

@@ -25,6 +25,11 @@
       1.6245000000000014,
       4.594295000000001,
       13.751622049194188
+    ],
+    "tridentate": [
+      1.6245000000000014,
+      4.594295000000001,
+      13.751622049194188
     ]
   },
   "generated_structures": {
@@ -37,6 +42,8 @@
     "bridge": "/home/lucas/Music/QML_ZnO/data/geometries/ZnO/co2_bridge.traj",
     "bridge_cif": "/home/lucas/Music/QML_ZnO/data/geometries/ZnO/co2_bridge.cif",
     "carbonate": "/home/lucas/Music/QML_ZnO/data/geometries/ZnO/co2_carbonate.traj",
-    "carbonate_cif": "/home/lucas/Music/QML_ZnO/data/geometries/ZnO/co2_carbonate.cif"
+    "carbonate_cif": "/home/lucas/Music/QML_ZnO/data/geometries/ZnO/co2_carbonate.cif",
+    "tridentate": "/home/lucas/Music/QML_ZnO/data/geometries/ZnO/co2_tridentate.traj",
+    "tridentate_cif": "/home/lucas/Music/QML_ZnO/data/geometries/ZnO/co2_tridentate.cif"
   }
 }

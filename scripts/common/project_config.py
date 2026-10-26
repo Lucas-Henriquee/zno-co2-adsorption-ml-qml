@@ -59,7 +59,11 @@ ADSORPTION_SITES: tuple[str, ...] = ("top_metal", "top_oxygen", "bridge")
 # DFT-only exploratory starts; not run by default and not used by TDDFT, CO2RR, MD or NEB.
 # "carbonate": bent CO2 with C above a surface O, a carbonate-like start that the three
 # linear starts above (2.2-3.7 A away) cannot reach by local relaxation.
-EXPLORATORY_SITES: tuple[str, ...] = ("carbonate",)
+# "tridentate": the same bent CO2 turned along [0001] (cell y axis), where the surface O has
+# its two Zn neighbours, as in the tridentate carbonate reported for ZnO(10-10)
+# (Wang et al., Angew. Chem. Int. Ed. 46, 5624, 2007). The carbonate start lies along x,
+# where those Zn are missing.
+EXPLORATORY_SITES: tuple[str, ...] = ("carbonate", "tridentate")
 DFT_SITES: tuple[str, ...] = ADSORPTION_SITES + EXPLORATORY_SITES
 
 CO2_SITE_HEIGHTS = {
@@ -67,6 +71,7 @@ CO2_SITE_HEIGHTS = {
     "top_oxygen": 3.17,  # Updated from the earlier 2.40 Angstrom placement.
     "bridge": 3.67,  # Updated from the earlier 2.80 Angstrom placement.
     "carbonate": 1.70,  # C above the surface O; between a C-O bond (~1.35 A) and contact.
+    "tridentate": 1.55,  # Closer to a C-O bond; stays above the 1.5 A start-geometry check.
 }
 
 # Bent CO2 for the carbonate start (O-C-O angle and C-O length of an activated CO2).
