@@ -20,12 +20,12 @@ ROOT = Path(__file__).resolve().parents[1]
 BASELINE = "4a2ff4a"
 # build_geometries.py and run_dft.py are deliberately excluded: the ZnO geometry
 # was corrected and BFGS convergence is now checked; see tests/test_geometry.py
-# and tests/test_dft_convergence.py.
+# and tests/test_dft_convergence.py. run_co2rr_pathways.py is excluded as well: it now
+# uses CHE free energies and a single-profile pathway; see tests/test_co2rr_*.py.
 SOURCES = {
     "run_tddft.py": "scripts/simulations/tddft/run_tddft.py",
     "run_md.py": "scripts/simulations/md/run_md.py",
     "run_neb.py": "scripts/simulations/neb/run_neb.py",
-    "run_co2rr_pathways.py": "scripts/simulations/co2rr/run_co2rr_pathways.py",
     "classical_svm_baseline.py": "scripts/models/ml/classical_svm_baseline.py",
     "qsvm_baseline.py": "scripts/models/qml/qsvm_baseline.py",
     "qsvm_ibm_hardware.py": "scripts/models/qml_ibm/qsvm_ibm_hardware.py",
