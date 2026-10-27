@@ -139,7 +139,7 @@ class WorkflowTests(unittest.TestCase):
             for column in run_tddft.RESULT_COLUMNS + ("tddft_status", "tddft_mode", "gs_nbands", "lr_energy_window_ev"):
                 self.assertIn(column, summary.columns)
             self.assertFalse(any(column.startswith("tddft_onset") for column in summary.columns))
-            self.assertEqual(int(summary["gs_nbands"].iloc[0]), 68)
+            self.assertEqual(int(summary["gs_nbands"].iloc[0]), 76)  # 68 converged + 8 buffer bands
             self.assertAlmostEqual(summary["co2_isolated_onset_ev"].iloc[0], 0.35 * Hartree)
             transitions = pd.read_csv(root / "tddft" / "ZnO" / "bridge" / "transitions.csv")
             np.testing.assert_allclose(transitions["energy_ev"], np.asarray(ENERGIES_HA) * Hartree)

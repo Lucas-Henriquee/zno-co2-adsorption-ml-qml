@@ -38,6 +38,7 @@ from scripts.common.project_config import ADSORPTION_SITES, DFT_RESULTS_DIR, MAT
 
 TDDFT_MODE = "co2_isolated_adsorbed_geometry_fd_gamma"
 GROUND_STATE_XC = "PBE"
+BAND_BUFFER = 8
 STATUS_OK = "ok"
 
 RESULT_COLUMNS = (
@@ -114,13 +115,13 @@ def parse_args() -> argparse.Namespace:
         "--nbands",
         type=int,
         default=68,
-        help="Ground-state bands (CO2 has 8 occupied; default adds 60 unoccupied).",
+        help="Bands on the fixed density (CO2 has 8 occupied); raised to converged + 8 buffer bands.",
     )
     parser.add_argument(
         "--converged-bands",
         type=int,
         default=None,
-        help="Bands converged in the ground-state SCF (convergence={'bands': N}). Default: all nbands.",
+        help="Bands converged on the fixed density (convergence={'bands': N}). Default: nbands.",
     )
     parser.add_argument(
         "--energy-window",
@@ -138,6 +139,9 @@ def ground_state_parameters(args: argparse.Namespace) -> dict[str, float | int |
         raise SystemExit("--nbands must exceed the 8 occupied CO2 bands.")
     if not 8 < converged <= nbands:
         raise SystemExit("--converged-bands must be > 8 and <= --nbands.")
+    # The top bands of the Davidson block converge poorly, so unconverged buffer bands are
+    # always added above the converged ones (GPAW LrTDDFT tutorial: nbands=10, bands=8).
+    nbands = max(nbands, converged + BAND_BUFFER)
     for name in ("grid_spacing", "box_size", "smearing_width", "energy_window"):
         if not float(getattr(args, name)) > 0.0:
             raise SystemExit(f"--{name.replace('_', '-')} must be positive.")
@@ -249,21 +253,25 @@ def _build_isolated_co2_ground_state(xyz_file: Path, out_dir: Path, params: dict
     fd_txt = out_dir / "co2_isolated_ground.txt"
     fd_gpw = out_dir / "co2_isolated_ground.gpw"
 
+    # Self-consistent density first, converging only the occupied states (GPAW default).
     calc = GPAW(
         mode="fd",
         h=float(params["gs_grid_spacing_ang"]),
         xc=GROUND_STATE_XC,
-        nbands=int(params["gs_nbands"]),
-        # Unoccupied states enter the Casida basis, so they must be converged.
-        convergence={"bands": int(params["gs_converged_bands"])},
-        # RMM-DIIS is unreliable for unoccupied states (GPAW docs); use Davidson.
-        eigensolver="dav",
         occupations=FermiDirac(float(params["gs_smearing_width_ev"])),
         symmetry="off",
         txt=str(fd_txt),
     )
     atoms.calc = calc
     atoms.get_potential_energy()
+    # Unoccupied states enter the Casida basis, so they are converged non-self-consistently
+    # on the fixed density. RMM-DIIS is unreliable for unoccupied states (GPAW docs): Davidson.
+    calc = calc.fixed_density(
+        nbands=int(params["gs_nbands"]),
+        convergence={"bands": int(params["gs_converged_bands"])},
+        eigensolver="dav",
+        txt=str(out_dir / "co2_isolated_bands.txt"),
+    )
     calc.write(str(fd_gpw), mode="all")
     return GPAW(str(fd_gpw), txt=None)
 
