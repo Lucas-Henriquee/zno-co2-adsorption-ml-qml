@@ -146,12 +146,29 @@ def is_rank0() -> bool:
     return mpi_rank() == 0
 
 
-def write_json(path: Path, payload: dict) -> None:
-    if not is_rank0():
+def mpi_barrier() -> None:
+    try:
+        from gpaw.mpi import world
+    except ImportError:
         return
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as handle:
-        json.dump(payload, handle, indent=2)
+    world.barrier()
+
+
+def broadcast_from_rank0(value):
+    """Rank 0's value on every rank (identity without MPI)."""
+    from ase.parallel import broadcast, world
+
+    return broadcast(value, root=0, comm=world)
+
+
+def write_json(path: Path, payload: dict) -> None:
+    # Every rank calls this; the barrier keeps the others from reading the file before
+    # rank 0 has finished writing it.
+    if is_rank0():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2)
+    mpi_barrier()
 
 
 # --------------------------------------------------------------------------- arguments
@@ -654,7 +671,12 @@ def run_vibrations(atoms, indices, *, out_dir: Path, label: str, profile, ecut, 
     name = out_dir / f"vib_{profile['name']}_d{delta:g}_{positions_hash(atoms)}"
     vib = Vibrations(atoms, indices=list(indices), name=str(name), delta=float(delta), nfree=2)
     vib.run()
-    return [complex(value) for value in vib.get_energies()]
+    # Only rank 0 writes the displacement cache, and it may still be writing the last file
+    # when the other ranks leave run(). Reading it on every rank raced and made some ranks
+    # fail alone (MPI deadlock), so rank 0 reads it and broadcasts the energies.
+    mpi_barrier()
+    energies = [complex(value) for value in vib.get_energies()] if is_rank0() else None
+    return broadcast_from_rank0(energies)
 
 
 # --------------------------------------------------------------------------- structures
