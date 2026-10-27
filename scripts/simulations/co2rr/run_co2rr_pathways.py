@@ -23,6 +23,7 @@ import csv
 import hashlib
 import json
 import math
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
@@ -550,7 +551,16 @@ def compute_term(
     relaxed = None
     just_relaxed = False
     if not overwrite:
-        payload = load_reusable_checkpoint(checkpoint_path, metadata, f"{label} ({profile_name})")
+        # Only rank 0 looks at the files and every rank follows its decision: a rank that
+        # checked after rank 0 had written energy.json would otherwise reuse it alone and
+        # skip a collective call (MPI deadlock).
+        decision = None
+        if is_rank0():
+            decision = (
+                load_reusable_checkpoint(checkpoint_path, metadata, f"{label} ({profile_name})"),
+                xyz_path.exists(),
+            )
+        payload, xyz_ready = broadcast_from_rank0(decision)
         if payload is not None and known_energy is not None:
             if not math.isclose(float(payload["energy_ev"]), float(known_energy), abs_tol=1.0e-6):
                 print0(f"[pathways] {label}: checkpoint energy differs from the DFT summary; not reused")
@@ -558,7 +568,7 @@ def compute_term(
         if payload is not None:
             if known_energy is not None:
                 relaxed = atoms.copy()
-            elif xyz_path.exists():
+            elif xyz_ready:
                 from ase.io import read
 
                 relaxed = read(xyz_path)
@@ -790,9 +800,13 @@ def adsorbate_free_energy_correction(vib_energies, temperature: float) -> tuple[
     """(G - E, ZPE, n_imag) of an adsorbate from HarmonicThermo (U - TS, slab frozen)."""
     from ase.thermochemistry import HarmonicThermo
 
-    thermo = HarmonicThermo(vib_energies=list(vib_energies), potentialenergy=0.0, ignore_imag_modes=True)
-    correction = float(thermo.get_helmholtz_energy(temperature, verbose=False))
-    zpe = float(thermo.get_ZPE_correction())
+    # The removed imaginary modes are counted in the imaginary_modes column, so ASE's
+    # per-call "imag modes removed" warning is silenced.
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message=r".*imag modes removed")
+        thermo = HarmonicThermo(vib_energies=list(vib_energies), potentialenergy=0.0, ignore_imag_modes=True)
+        correction = float(thermo.get_helmholtz_energy(temperature, verbose=False))
+        zpe = float(thermo.get_ZPE_correction())
     return correction, zpe, int(thermo.n_imag)
 
 
@@ -804,17 +818,19 @@ def gas_free_energy_correction(name: str, atoms, vib_energies, temperature: floa
     molecule = atoms.copy()
     molecule.pbc = False  # only the moments of inertia and the mass are used
     molecule.calc = None
-    thermo = IdealGasThermo(
-        vib_energies=list(vib_energies),
-        geometry=str(spec["geometry"]),
-        potentialenergy=0.0,
-        atoms=molecule,
-        symmetrynumber=int(spec["symmetrynumber"]),
-        spin=float(spec["spin"]),
-        ignore_imag_modes=True,
-    )
-    correction = float(thermo.get_gibbs_energy(temperature=temperature, pressure=pressure_pa, verbose=False))
-    zpe = float(thermo.get_ZPE_correction())
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message=r".*imag modes removed")
+        thermo = IdealGasThermo(
+            vib_energies=list(vib_energies),
+            geometry=str(spec["geometry"]),
+            potentialenergy=0.0,
+            atoms=molecule,
+            symmetrynumber=int(spec["symmetrynumber"]),
+            spin=float(spec["spin"]),
+            ignore_imag_modes=True,
+        )
+        correction = float(thermo.get_gibbs_energy(temperature=temperature, pressure=pressure_pa, verbose=False))
+        zpe = float(thermo.get_ZPE_correction())
     return correction, zpe, int(getattr(thermo, "n_imag", 0))
 
 
@@ -983,6 +999,8 @@ def build_result_row(
             if species != "*":
                 row[f"Gcorr_{SPECIES_COLUMN[species]}_ev"] = corrections[species]
         row["imaginary_modes"] = ";".join(f"{name}:{count}" for name, count in imaginary.items() if count)
+        if row["imaginary_modes"]:
+            print0(f"[pathways] imaginary modes removed from the thermochemistry: {row['imaginary_modes']}")
     for species in ("COOH*", "CO*", "O*"):
         if species in terms:
             row[f"magmom_{SPECIES_COLUMN[species]}_final"] = terms[species].magmom_final

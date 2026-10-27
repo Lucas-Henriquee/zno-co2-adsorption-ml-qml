@@ -247,3 +247,13 @@ def _nonperiodic(atoms):
     atoms = atoms.copy()
     atoms.pbc = False
     return atoms
+
+
+def test_removed_imaginary_modes_are_counted_without_warnings():
+    import warnings
+
+    energies = [0.01j, 0.02j, 0.03j, 0.05, 0.1, 0.2]
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        _, _, n_imag = co2rr.adsorbate_free_energy_correction(energies, 298.15)
+    assert n_imag == 3
