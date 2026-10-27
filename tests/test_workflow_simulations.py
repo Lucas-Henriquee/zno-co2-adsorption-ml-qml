@@ -104,5 +104,73 @@ class MethodFailureTests(unittest.TestCase):
         self.assertEqual(manifest["methods"]["dft"]["status"], "completed")
 
 
+class RetryFailedTests(unittest.TestCase):
+    """--resume --retry-failed archives a failed method's outputs and runs it again."""
+
+    TDDFT_FAIL = """
+        import os, sys
+        root = os.environ["QML_ZNO_RESULTS_DIR"]
+        os.makedirs(os.path.join(root, "tddft", "ZnO"), exist_ok=True)
+        open(os.path.join(root, "tddft", "ZnO", "partial.txt"), "w").write("old")
+        open(os.path.join(root, "tddft_summary.csv"), "w").write("old")
+        sys.exit(1)
+        """
+
+    def run(self, result=None):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp)
+        return super().run(result)
+
+    def main(self, tddft_source, *extra):
+        config = self.tmp / "config.yaml"
+        if not config.exists():
+            shutil.copy(PRODUCTION, config)
+        commands = {
+            "geometry": [[sys.executable, "-c", "pass"]],
+            "dft": [[sys.executable, "-c", textwrap.dedent(MethodFailureTests.WRITE_SUMMARY.format(status={}))]],
+            "tddft": [[sys.executable, "-c", textwrap.dedent(tddft_source)]],
+        }
+        argv = ["run_simulations", "dft", "tddft", "--config", str(config), "--run-id", "r1",
+                "--mpi-processes", "1", *extra]
+        error = None
+        with mock.patch.object(simulations, "PROJECT_ROOT", self.tmp), \
+                mock.patch.object(sys, "argv", argv), \
+                mock.patch.object(simulations, "build_commands",
+                                  side_effect=lambda method, *args: commands[method]), \
+                contextlib.redirect_stdout(io.StringIO()):
+            try:
+                simulations.main()
+            except BaseException as exc:
+                error = exc
+        run_dir = self.tmp / "results/simulations/r1"
+        return error, json.loads((run_dir / "run_manifest.json").read_text()), run_dir
+
+    def test_failed_method_needs_the_flag_and_is_archived_on_retry(self):
+        error, manifest, run_dir = self.main(self.TDDFT_FAIL)
+        self.assertIsNotNone(error)
+        self.assertEqual(manifest["methods"]["tddft"]["status"], "failed")
+
+        error, manifest, _ = self.main("pass", "--resume")
+        self.assertIn("--retry-failed", str(error))
+
+        error, manifest, _ = self.main("pass", "--resume", "--retry-failed")
+        self.assertIsNone(error)
+        record = manifest["methods"]["tddft"]
+        self.assertEqual(record["status"], "completed")
+        self.assertEqual(record["previous_attempts"][0]["status"], "failed")
+        archive = Path(record["previous_attempts"][0]["archived_to"])
+        self.assertTrue((archive / "tddft" / "ZnO" / "partial.txt").exists())
+        self.assertTrue((archive / "tddft_summary.csv").exists())
+        self.assertTrue((archive / "tddft.log").exists())
+        self.assertFalse((run_dir / "tddft_summary.csv").exists())
+        self.assertEqual(manifest["methods"]["dft"]["status"], "completed")
+
+    def test_retry_failed_requires_resume(self):
+        with mock.patch.object(sys, "argv", ["run_simulations", "dft", "--retry-failed"]), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                simulations.main()
+
+
 if __name__ == "__main__":
     unittest.main()

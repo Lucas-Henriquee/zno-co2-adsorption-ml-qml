@@ -64,6 +64,11 @@ def parse_args() -> argparse.Namespace:
         help="Continue an existing run and skip methods already marked completed.",
     )
     parser.add_argument(
+        "--retry-failed",
+        action="store_true",
+        help="With --resume: archive the outputs of failed or interrupted methods and run them again.",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Validate configuration and print commands without creating files or running methods.",
@@ -237,6 +242,18 @@ def command_prefix(method: str, config: dict[str, Any], mpi_processes: int) -> l
     if not isinstance(extra_args, list):
         fail("Configuration field 'execution.mpi.extra_args' must be a list.")
     return [launcher, *[str(item) for item in extra_args], "-n", str(mpi_processes), "gpaw", "python", "-m", MODULES[method]]
+
+
+def archive_method_outputs(run_dir: Path, method: str) -> Path:
+    """Move a failed attempt's folder, top-level files and log out of the way."""
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    archive = run_dir / "failed_attempts" / f"{method}_{stamp}"
+    archive.mkdir(parents=True)
+    candidates = [run_dir / method, run_dir / "logs" / f"{method}.log", *run_dir.glob(f"{method}_*")]
+    for path in candidates:
+        if path.exists():
+            shutil.move(str(path), str(archive / path.name))
+    return archive
 
 
 def build_commands(
@@ -483,6 +500,8 @@ def main() -> None:
     config_hash = file_sha256(config_path)
     current_versions = runtime_versions()
 
+    if args.retry_failed and not args.resume:
+        fail("--retry-failed requires --resume.")
     if args.no_dependencies and not args.resume:
         dependent = [method for method in selected_methods if DEPENDENCIES[method]]
         if dependent:
@@ -586,16 +605,25 @@ def main() -> None:
             if previous_status == "completed":
                 print(f"[skip] {method} is already completed in this run.")
                 continue
+            previous_attempts: list[dict[str, Any]] = []
             if previous_status in {"running", "failed"}:
-                fail(
-                    f"Method '{method}' has status '{previous_status}'. Start a new run ID to preserve its partial outputs."
-                )
+                if not args.retry_failed:
+                    fail(
+                        f"Method '{method}' has status '{previous_status}'. Start a new run ID, or pass "
+                        "--retry-failed to archive its partial outputs and run it again."
+                    )
+                previous = manifest["methods"][method]
+                previous["archived_to"] = str(archive_method_outputs(run_dir, method))
+                previous_attempts = [*previous.pop("previous_attempts", []), previous]
+                print(f"[retry] {method} was '{previous_status}'; outputs archived to {previous['archived_to']}")
 
             method_record = {
                 "status": "running",
                 "started_at": utc_now(),
                 "commands": commands_by_method[method],
             }
+            if previous_attempts:
+                method_record["previous_attempts"] = previous_attempts
             manifest.setdefault("methods", {})[method] = method_record
             write_manifest(manifest_path, manifest)
 
