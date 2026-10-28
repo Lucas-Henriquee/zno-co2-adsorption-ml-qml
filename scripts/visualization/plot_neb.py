@@ -13,10 +13,13 @@ import pandas as pd
 
 from scripts.common.project_config import RESULTS_DIR
 from scripts.simulations.neb.run_neb import (
+    DEFAULT_BARRIER_RESOLUTION_EV,
     STATUS_CONVERGED,
+    band_fit,
     barrier_metrics,
     discover_neb_runs,
-    read_image_energies,
+    read_final_images,
+    resolve_barrier_resolution,
 )
 
 
@@ -46,6 +49,22 @@ def parse_args(argv=None):
     )
 
     parser.add_argument(
+        "--barrier-resolution",
+        type=float,
+        default=None,
+        help="Smallest forward barrier (eV) reported as resolved "
+             "(default: methods.neb.barrier_resolution_ev of <results>/config.yaml, else 0.03).",
+    )
+
+    parser.add_argument(
+        "--smooth-band",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Overlay the force-based spline of ase.utils.forcecurve.fit_images "
+             "(NEBTools.plot_band) on each profile, using the stored image forces.",
+    )
+
+    parser.add_argument(
         "--dpi",
         type=int,
         default=200,
@@ -61,8 +80,18 @@ def pathway_label(initial_site: str, final_site: str) -> str:
 
 
 # LOAD ALL RUNS
-def analyze_runs(runs: list[dict], include_unconverged: bool = False) -> list[dict]:
-    """Barrier metrics per pair; non-converged pairs are reported and skipped unless requested."""
+def analyze_runs(
+    runs: list[dict],
+    include_unconverged: bool = False,
+    resolution_ev: float = DEFAULT_BARRIER_RESOLUTION_EV,
+    smooth_band: bool = False,
+) -> list[dict]:
+    """Barrier metrics per pair, recomputed from the stored band energies.
+
+    The metrics stored in neb_run_summary.json are not used, so runs written with an
+    older barrier definition are re-analysed consistently. Non-converged pairs are
+    reported and skipped unless requested.
+    """
     results = []
 
     for run in runs:
@@ -75,8 +104,14 @@ def analyze_runs(runs: list[dict], include_unconverged: bool = False) -> list[di
             print(f"[SKIP] {folder.name}: status={status or 'unknown'}")
             continue
 
-        energies = read_image_energies(folder)
-        metrics = barrier_metrics(energies)
+        images = read_final_images(folder)
+        energies = []
+        for atoms in images:
+            try:
+                energies.append(float(atoms.get_potential_energy()))
+            except Exception:
+                energies.append(float("nan"))
+        metrics = barrier_metrics(energies, resolution_ev=resolution_ev)
 
         if metrics is None:
             print(f"[WARNING] {folder.name}: no valid image energies (status={status})")
@@ -88,6 +123,7 @@ def analyze_runs(runs: list[dict], include_unconverged: bool = False) -> list[di
             "pathway": pathway_label(run["initial_site"], run["final_site"]),
             "converged": converged,
             "climb_activated": bool(run["summary"].get("climb_activated", False)),
+            "band_fit": band_fit(images) if smooth_band else None,
         }
 
         results.append(result)
@@ -97,8 +133,9 @@ def analyze_runs(runs: list[dict], include_unconverged: bool = False) -> list[di
             f"Ea_fwd={metrics['forward_barrier_eV']:8.4f} eV   "
             f"Ea_rev={metrics['reverse_barrier_eV']:8.4f} eV   "
             f"DeltaE={metrics['reaction_energy_eV']:8.4f} eV   "
-            f"TS image={metrics['highest_image_index']}"
+            f"E_max image={metrics['highest_image_index']}"
             f"{'   [no internal saddle]' if metrics['no_internal_saddle'] else ''}"
+            f"{'' if metrics['barrier_resolved'] else '   [no resolved barrier]'}"
             f"{'' if converged else f'   [{status}]'}"
         )
 
@@ -156,7 +193,10 @@ def save_summary_table(results: list[dict], out: Path):
                 "reverse_barrier_eV": result["reverse_barrier_eV"],
                 "reaction_energy_eV": result["reaction_energy_eV"],
                 "highest_image_index": result["highest_image_index"],
+                "highest_internal_image_index": result["highest_internal_image_index"],
                 "no_internal_saddle": result["no_internal_saddle"],
+                "barrier_resolution_eV": result["barrier_resolution_eV"],
+                "barrier_resolved": result["barrier_resolved"],
                 "climb_activated": result["climb_activated"],
                 "status": result["status"],
                 "folder": result["folder_name"],
@@ -194,6 +234,14 @@ def plot_individual_profile(result: dict, output_dir: Path, dpi: int):
         linewidth=2,
     )
 
+    fit = result.get("band_fit")
+    if fit is not None:
+        # Smooth band against the image index: the spline is drawn on the path length,
+        # mapped piecewise-linearly onto the image positions of the plot.
+        fit_x = np.interp(fit["fit_path_ang"], fit["path_ang"], x)
+        ax.plot(fit_x, fit["fit_relative_energies"], linewidth=1.2, linestyle="-", alpha=0.6,
+                label="force-based spline")
+
     highest = result["highest_image_index"]
 
     ax.plot(
@@ -225,6 +273,8 @@ def plot_individual_profile(result: dict, output_dir: Path, dpi: int):
     flags = []
     if result["no_internal_saddle"]:
         flags.append("no internal saddle")
+    elif not result["barrier_resolved"]:
+        flags.append(f"barrier below {result['barrier_resolution_eV']:.2f} eV resolution")
     if not result["converged"]:
         flags.append(f"status: {result['status']}")
 
@@ -239,7 +289,7 @@ def plot_individual_profile(result: dict, output_dir: Path, dpi: int):
         f"Forward barrier = {result['forward_barrier_eV']:.3f} eV\n"
         f"Reverse barrier = {result['reverse_barrier_eV']:.3f} eV\n"
         f"ΔE = {result['reaction_energy_eV']:.3f} eV\n"
-        f"highest image = {highest}"
+        f"highest image (E_max) = {highest}"
     )
 
     ax.text(
@@ -259,6 +309,9 @@ def plot_individual_profile(result: dict, output_dir: Path, dpi: int):
     ax.grid(
         alpha=0.25,
     )
+
+    if fit is not None:
+        ax.legend(loc="lower left", fontsize=9)
 
     fig.tight_layout()
 
@@ -297,6 +350,8 @@ def plot_barriers(
         label = result["pathway"]
         if result["no_internal_saddle"]:
             label += "\n(no internal saddle)"
+        elif not result["barrier_resolved"]:
+            label += "\n(below resolution)"
         if not result["converged"]:
             label += f"\n[{result['status']}]"
         labels.append(label)
@@ -312,8 +367,8 @@ def plot_barriers(
     )
 
     for offset, values, name in (
-        (-width / 2, forward, "forward (E_TS − E_IS)"),
-        (width / 2, reverse, "reverse (E_TS − E_FS)"),
+        (-width / 2, forward, "forward (E_max − E_IS)"),
+        (width / 2, reverse, "reverse (E_max − E_FS)"),
     ):
 
         bars = ax.bar(
@@ -421,7 +476,15 @@ def main(argv=None):
 
     print()
 
-    results = analyze_runs(runs, include_unconverged=args.include_unconverged)
+    resolution = resolve_barrier_resolution(args.barrier_resolution, base)
+    print(f"Barrier resolution: {resolution:.3f} eV (E_max over all images, endpoints included)")
+
+    results = analyze_runs(
+        runs,
+        include_unconverged=args.include_unconverged,
+        resolution_ev=resolution,
+        smooth_band=args.smooth_band,
+    )
 
     if not results:
 

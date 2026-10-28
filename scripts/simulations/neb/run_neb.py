@@ -30,11 +30,14 @@ DEFAULT_PAIRS = (("top_metal", "bridge"), ("bridge", "top_oxygen"))
 DEFAULT_FMAX_CI = 0.05
 DEFAULT_DFT_FMAX = 0.05
 ADSORBATE_ATOMS = 3  # CO2 = last three atoms (O, C, O)
-# A single point on 2 ranks per image does not reproduce the 6-rank DFT energy to the
+# The endpoint single points run on all MPI ranks (no image sub-communicator) with the
+# image calculator settings; a fresh SCF still does not reproduce the DFT energy to the
 # last meV (SCF convergence is per electron), so the provenance check needs some slack.
 DEFAULT_ENDPOINT_ENERGY_TOL_EV = 0.02
 DEFAULT_ENDPOINT_FORCE_FACTOR = 1.5
 MIN_ENDPOINT_DISPLACEMENT_ANG = 0.3
+# Smallest forward barrier (eV) reported as resolved; methods.neb.barrier_resolution_ev.
+DEFAULT_BARRIER_RESOLUTION_EV = 0.03
 
 SUMMARY_JSON = "neb_run_summary.json"
 FINAL_IMAGES_TRAJ = "neb_final_images.traj"
@@ -82,7 +85,10 @@ PATHS_SUMMARY_FIELDS = [
     "reverse_barrier_eV",
     "reaction_energy_eV",
     "highest_image_index",
+    "highest_internal_image_index",
     "no_internal_saddle",
+    "barrier_resolution_eV",
+    "barrier_resolved",
     "message",
 ]
 
@@ -267,6 +273,9 @@ def resolve_settings(args, config: dict) -> None:
     if args.dft_fmax is None:
         args.dft_fmax = float(dft_cfg.get("fmax_ev_per_angstrom", DEFAULT_DFT_FMAX))
     args.endpoint_energy_tol_ev = float(neb_cfg.get("endpoint_energy_tol_ev", DEFAULT_ENDPOINT_ENERGY_TOL_EV))
+    args.barrier_resolution_ev = float(neb_cfg.get("barrier_resolution_ev", DEFAULT_BARRIER_RESOLUTION_EV))
+    if args.barrier_resolution_ev < 0.0:
+        raise SystemExit("methods.neb.barrier_resolution_ev must be non-negative.")
     args.endpoint_force_tol = args.dft_fmax * float(
         neb_cfg.get("endpoint_force_factor", DEFAULT_ENDPOINT_FORCE_FACTOR)
     )
@@ -304,12 +313,19 @@ def check_parallel_layout(internal_images: int, world_size: int, parallel_images
 
 
 # BARRIER
-def barrier_metrics(energies) -> dict | None:
-    """Barrier from the highest internal image; both endpoints are excluded.
+def barrier_metrics(energies, resolution_ev: float = DEFAULT_BARRIER_RESOLUTION_EV) -> dict | None:
+    """Barriers from the highest energy of the whole band, endpoints included.
+
+    E_max = max over all images, Ea_fwd = E_max - E_IS and Ea_rev = E_max - E_FS, so
+    Ea_fwd >= 0 and Ea_rev >= 0 always hold and, for a downhill path without a saddle,
+    Ea_fwd = 0 and Ea_rev = |dE|. ``highest_image_index`` is the image of E_max (an
+    endpoint when there is no internal maximum). ``no_internal_saddle`` is True when the
+    highest internal image is not above both endpoints (monotonic profile).
+    ``barrier_resolved`` is True only for an internal saddle with Ea_fwd above
+    ``resolution_ev``; smaller values are below what a 3-image band and the SCF/fmax
+    tolerances can resolve and are reported as no resolved barrier.
 
     Returns None when there is no internal image or an energy is not finite.
-    ``no_internal_saddle`` is True when the internal maximum is not above both
-    endpoints (monotonic profile), so the forward value is not a saddle barrier.
     """
     energies = [float(value) for value in energies]
 
@@ -319,17 +335,25 @@ def barrier_metrics(energies) -> dict | None:
     e_is = energies[0]
     e_fs = energies[-1]
     internal = energies[1:-1]
-    highest = 1 + int(np.argmax(internal))
-    e_ts = energies[highest]
+    highest_internal = 1 + int(np.argmax(internal))
+    e_internal_max = energies[highest_internal]
+    highest = int(np.argmax(energies))
+    e_max = energies[highest]
+
+    no_internal_saddle = not (e_internal_max > e_is and e_internal_max > e_fs)
+    forward = e_max - e_is
 
     return {
         "energies": energies,
         "relative_energies": [value - e_is for value in energies],
-        "forward_barrier_eV": e_ts - e_is,
-        "reverse_barrier_eV": e_ts - e_fs,
+        "forward_barrier_eV": forward,
+        "reverse_barrier_eV": e_max - e_fs,
         "reaction_energy_eV": e_fs - e_is,
         "highest_image_index": highest,
-        "no_internal_saddle": not (e_ts > e_is and e_ts > e_fs),
+        "highest_internal_image_index": highest_internal,
+        "no_internal_saddle": no_internal_saddle,
+        "barrier_resolution_eV": float(resolution_ev),
+        "barrier_resolved": bool(forward > float(resolution_ev) and not no_internal_saddle),
         "n_total_images": len(energies),
         "n_internal_images": len(energies) - 2,
     }
@@ -466,7 +490,10 @@ def make_calculator(settings: dict, txt_file: Path, communicator=None):
 
 
 def endpoint_single_point(atoms, settings: dict, txt_file: Path) -> tuple[float, float]:
-    """Recompute energy and forces with the image calculator, then freeze them."""
+    """Recompute energy and forces with the image calculator, then freeze them.
+
+    No communicator is passed, so the single point runs on all MPI ranks (world).
+    """
     from ase.calculators.singlepoint import SinglePointCalculator
 
     atoms.calc = make_calculator(settings, txt_file)
@@ -568,23 +595,69 @@ def discover_neb_runs(base: Path) -> list[dict]:
     return runs
 
 
-def read_image_energies(folder: Path) -> list[float]:
-    """Energies of the final band from the frames written by run_neb (not GPAW logs)."""
+def read_final_images(folder: Path) -> list:
+    """Final band frames written by run_neb (traj with energies and forces, else image_XX.xyz)."""
     from ase.io import read
 
     traj = folder / FINAL_IMAGES_TRAJ
     if traj.exists():
-        images = read(traj, index=":")
-    else:
-        images = [read(path) for path in sorted(folder.glob("image_[0-9][0-9].xyz"))]
+        return list(read(traj, index=":"))
+    return [read(path) for path in sorted(folder.glob("image_[0-9][0-9].xyz"))]
 
+
+def read_image_energies(folder: Path) -> list[float]:
+    """Energies of the final band from the frames written by run_neb (not GPAW logs)."""
     energies = []
-    for atoms in images:
+    for atoms in read_final_images(folder):
         try:
             energies.append(float(atoms.get_potential_energy()))
         except Exception:
             energies.append(float("nan"))
     return energies
+
+
+def band_fit(images) -> dict | None:
+    """Smooth band through the images from their energies and stored forces.
+
+    Uses ase.utils.forcecurve.fit_images (what ase.mep.NEBTools.plot_band draws): a cubic
+    spline per segment matching the energies and the forces projected on the path.
+    Returns None when the frames have no energies or forces.
+    """
+    from ase.utils.forcecurve import fit_images
+
+    try:
+        fit = fit_images(images)
+    except Exception as exc:
+        print(f"[WARNING] smooth band fit not available: {type(exc).__name__}: {exc}")
+        return None
+    e_is = float(fit.energies[0])
+    return {
+        "path_ang": [float(value) for value in fit.path],
+        "relative_energies": [float(value) - e_is for value in fit.energies],
+        "fit_path_ang": [float(value) for value in fit.fit_path],
+        "fit_relative_energies": [float(value) - e_is for value in fit.fit_energies],
+    }
+
+
+def resolve_barrier_resolution(cli_value: float | None, base: Path) -> float:
+    """Barrier resolution (eV) for re-analysis of a run: CLI, else YAML, else the default.
+
+    ``base`` is <results>/neb/<material>; the YAML is <results>/config.yaml (copied there by
+    the workflow), else the production YAML.
+    """
+    if cli_value is not None:
+        value = float(cli_value)
+    else:
+        results_dir = Path(base).resolve().parents[1]
+        try:
+            config = load_config(None, results_dir)
+        except Exception as exc:  # unreadable YAML: fall back to the default
+            print(f"[WARNING] could not read the NEB configuration: {exc}")
+            config = {}
+        value = float(method_settings(config, "neb").get("barrier_resolution_ev", DEFAULT_BARRIER_RESOLUTION_EV))
+    if value < 0.0:
+        raise SystemExit("The barrier resolution must be non-negative.")
+    return value
 
 
 def write_paths_summary(material_dir: Path):
@@ -776,7 +849,9 @@ def _run_pair(record: dict, *, material: str, initial_site: str, final_site: str
 
         write(out_dir / FINAL_IMAGES_TRAJ, final_images, parallel=False)
 
-    metrics = barrier_metrics(energies)
+    metrics = barrier_metrics(
+        energies, resolution_ev=getattr(args, "barrier_resolution_ev", DEFAULT_BARRIER_RESOLUTION_EV)
+    )
     record["energies_ev"] = energies
 
     if metrics is None:

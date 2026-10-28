@@ -229,15 +229,23 @@ class RunNebTests(unittest.TestCase):
         summary = json.loads(path.read_text())
         summary["status"] = "max_steps_reached"
         path.write_text(json.dumps(summary))
+        # Stale metrics from an older barrier definition must not be trusted.
+        path = base / "top_metal_to_bridge" / "neb_run_summary.json"
+        stale = json.loads(path.read_text())
+        stale["forward_barrier_eV"] = 999.0
+        stale["highest_image_index"] = 1
+        path.write_text(json.dumps(stale))
 
         with contextlib.redirect_stdout(io.StringIO()):
-            plot_neb.main(["--base", str(base), "--dpi", "40"])
-            neb_energy_table.main(["--base", str(base)])
+            plot_neb.main(["--base", str(base), "--dpi", "40", "--smooth-band"])
+            neb_energy_table.main(["--base", str(base), "--barrier-resolution", "0.01"])
 
         with (base / "comparison_plots" / "neb_summary_table.csv").open() as handle:
             rows = list(csv.DictReader(handle))
         self.assertEqual([row["folder"] for row in rows], ["top_metal_to_bridge"])
         self.assertEqual(rows[0]["highest_image_index"], "3")
+        self.assertAlmostEqual(float(rows[0]["forward_barrier_eV"]), 3 * AMPLITUDE, places=3)
+        self.assertEqual(rows[0]["barrier_resolved"], "True")
         self.assertTrue((base / "comparison_plots" / "individual_profiles" / "neb_profile_top_metal_to_bridge.png").exists())
         self.assertTrue((base / "comparison_plots" / "migration_barrier_comparison.png").exists())
 
@@ -245,6 +253,21 @@ class RunNebTests(unittest.TestCase):
             rows = list(csv.DictReader(handle))
         self.assertEqual({row["pair"] for row in rows}, {"top_metal_to_bridge", "bridge_to_top_oxygen"})
         self.assertEqual({row["status"] for row in rows if row["pair"] == "bridge_to_top_oxygen"}, {"max_steps_reached"})
+
+        with (base / "comparison_plots" / "neb_barriers.csv").open() as handle:
+            barriers = {row["pair"]: row for row in csv.DictReader(handle)}
+        self.assertAlmostEqual(float(barriers["top_metal_to_bridge"]["forward_barrier_eV"]), 3 * AMPLITUDE, places=3)
+        self.assertEqual(float(barriers["top_metal_to_bridge"]["barrier_resolution_eV"]), 0.01)
+
+    def test_smooth_band_fit_uses_stored_forces(self):
+        self.write_endpoints({"top_metal": 0.0, "bridge": PERIOD})
+        self.run_pairs("--initial-site", "top_metal", "--final-site", "bridge")
+        images = run_neb.read_final_images(self.results / "neb" / "ZnO" / "top_metal_to_bridge")
+        fit = run_neb.band_fit(images)
+        self.assertIsNotNone(fit)
+        self.assertAlmostEqual(fit["fit_relative_energies"][0], 0.0)
+        self.assertGreater(len(fit["fit_path_ang"]), len(images))
+        self.assertAlmostEqual(max(fit["relative_energies"]), 3 * AMPLITUDE, places=3)
 
 
 if __name__ == "__main__":
