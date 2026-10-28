@@ -1,3 +1,15 @@
+"""Summary and transition tables from the LrTDDFT spectrum of the isolated CO2.
+
+WARNING: these are excitations of the CO2 molecule alone, cut out of its adsorbed
+geometry and placed in a box, not of the ZnO/CO2 system. The physisorbed CO2
+keeps nearly the same (linear) geometry on every site, so the TDDFT descriptors
+are essentially identical across sites: they carry no information about the
+adsorption site and are NOT suitable as features for site classification. The
+tables are kept as spectroscopic references. Each row carries ``group`` =
+material/site (one TDDFT calculation); the transitions of one calculation are not
+independent samples and must never be split between train and test.
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -6,6 +18,12 @@ from pathlib import Path
 import pandas as pd
 
 from scripts.common.project_config import DATA_DIR
+
+CLASSIFICATION_WARNING = (
+    "[tddft-dataset] WARNING: TDDFT descriptors of the isolated CO2 are (almost) identical "
+    "across sites and are not suitable for site classification; group = material/site "
+    "marks the single calculation behind every row."
+)
 
 
 SITE_LABELS = {
@@ -57,6 +75,7 @@ def read_summary(path: Path) -> pd.DataFrame:
         raise ValueError("Unknown site found in summary.")
 
     df["label_id"] = df["label_id"].astype(int)
+    df["group"] = df["material"].astype(str) + "/" + df["site"].astype(str)
 
     return df
 
@@ -71,6 +90,7 @@ def build_summary_dataset(summary: pd.DataFrame) -> pd.DataFrame:
     cols = [
         "material",
         "site",
+        "group",
         "label_site",
         "label_id",
         "feature_1_co2_isolated_total_f",
@@ -122,6 +142,8 @@ def build_transitions_dataset(summary: pd.DataFrame, transitions: pd.DataFrame) 
         raise ValueError("Unknown site found in transitions.")
 
     data["label_id"] = data["label_id"].astype(int)
+    # Every transition of one calculation shares this id (grouped splits only).
+    data["group"] = data["material"].astype(str) + "/" + data["site"].astype(str)
 
     data["feature_1_energy_ev"] = data["energy_ev"]
     data["feature_2_oscillator_strength"] = data["oscillator_strength"]
@@ -130,6 +152,7 @@ def build_transitions_dataset(summary: pd.DataFrame, transitions: pd.DataFrame) 
     cols = [
         "material",
         "site",
+        "group",
         "label_site",
         "label_id",
         "transition_index",
@@ -147,6 +170,9 @@ def save_dataset(df: pd.DataFrame, path: Path):
 
     print(f"\nSaved: {path}")
     print(f"Samples: {len(df)}")
+    if "group" in df.columns:
+        print(f"Groups (independent TDDFT calculations): {df['group'].nunique()}")
+    print(CLASSIFICATION_WARNING)
     print("Classes:")
     print(df["label_site"].value_counts())
 

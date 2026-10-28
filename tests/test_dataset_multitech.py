@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import csv
+import json
+import math
 from pathlib import Path
 import sys
 import tempfile
@@ -18,7 +20,7 @@ from scripts.datasets import prepare_multitech_dataset as pm
 
 SITES = ("top_metal", "top_oxygen", "bridge")
 SEEDS = (1, 2, 3)
-PHI = 0.9  # AR(1) coefficient: tau_int = (1 + phi) / (1 - phi) = 19 frames
+PHI = 0.9  # AR(1) coefficient: statistical inefficiency g = (1 + phi) / (1 - phi) = 19 frames
 
 
 def ar1(n: int, phi: float, rng: np.random.Generator) -> np.ndarray:
@@ -128,7 +130,7 @@ class DatasetTests(unittest.TestCase):
         top_oxygen = summary.set_index("site").loc["top_oxygen"]
         # Gamma-grid PBE gaps (1.2 - 1.0), not the mesh gaps (3.5 - 3.0).
         self.assertAlmostEqual(top_oxygen["feature_dft_pbe_gap_change_ev"], 0.2)
-        self.assertAlmostEqual(top_oxygen["feature_tddft_co2_isolated_onset_ev"], 9.1)
+        self.assertAlmostEqual(top_oxygen["tddft_co2_isolated_onset_ev"], 9.1)
         self.assertEqual(int(top_oxygen["md_n_trajectories"]), len(SEEDS))
         self.assertTrue(summary["group"].is_unique)
         bridge = summary.set_index("site").loc["bridge"]
@@ -152,8 +154,8 @@ class DatasetTests(unittest.TestCase):
     def test_block_length_exceeds_correlation_time(self):
         windows = pm.build_unique_md_window_dataset(self.root, 0, block_tau_factor=2.0)
         frame_dt = 2.0
-        self.assertTrue((windows["block_length_fs"] >= 2.0 * windows["tau_int_fs"] - frame_dt).all())
-        self.assertTrue((windows["tau_int_fs"] > 5 * frame_dt).all())  # AR(1), phi = 0.9
+        self.assertTrue((windows["block_length_fs"] >= 2.0 * windows["statistical_inefficiency_fs"] - frame_dt).all())
+        self.assertTrue((windows["statistical_inefficiency_fs"] > 5 * frame_dt).all())  # AR(1), phi = 0.9
         self.assertTrue((windows["lag1_autocorrelation"] > 0.7).all())
         # Blocks of a trajectory do not overlap.
         for _, group in windows.groupby("group"):
@@ -188,6 +190,112 @@ class DatasetTests(unittest.TestCase):
         self.assertIn("group", windows.columns)
         summary = pd.read_csv(out / "multitech_selected_features_dataset.csv")
         self.assertEqual(len(summary), len(SITES))
+        metadata = json.loads((out / "md_window_unique_dataset_metadata.json").read_text())
+        self.assertEqual(metadata["block_length_fs"], float(windows["block_length_fs"].iloc[0]))
+        self.assertEqual(metadata["source"], "block_tau_factor_x_max_statistical_inefficiency")
+        self.assertEqual(len(metadata["per_trajectory"]), len(SITES) * len(SEEDS))
+
+    def test_common_block_length_is_identical_for_all_trajectories(self):
+        windows = pm.build_unique_md_window_dataset(self.root, 0, block_tau_factor=2.0)
+        self.assertEqual(windows["block_length_fs"].nunique(), 1)
+        # Per-trajectory g differs, the block does not: it follows the largest g.
+        self.assertGreater(windows.groupby("group")["statistical_inefficiency_fs"].first().nunique(), 1)
+        block = windows.attrs["block"]
+        self.assertAlmostEqual(
+            block["block_length_frames"], math.ceil(2.0 * block["max_statistical_inefficiency_frames"])
+        )
+        self.assertAlmostEqual(windows["statistical_inefficiency_fs"].max(), block["max_statistical_inefficiency_fs"])
+        full = windows[windows["window_n_frames"] == block["block_length_frames"]]
+        self.assertEqual(len(full), len(windows))
+
+    def test_fixed_block_length_overrides_the_estimate(self):
+        windows = pm.build_unique_md_window_dataset(self.root, 0, block_length_fs=100.0)
+        self.assertTrue((windows["block_length_fs"] == 100.0).all())
+        self.assertTrue((windows["window_n_frames"] == 50).all())  # 2 fs per frame
+        self.assertEqual(windows.attrs["block"]["source"], "fixed_block_length_fs")
+        self.assertEqual(windows.groupby("group").size().unique().tolist(), [400 // 50])
+
+    def test_capped_block_is_still_common(self):
+        capped = pm.build_unique_md_window_dataset(self.root, 3)
+        self.assertEqual(capped["block_length_fs"].nunique(), 1)
+        self.assertTrue((capped.groupby("group").size() <= 3).all())
+
+    def test_tddft_is_never_a_classification_feature(self):
+        out = self.root / "out"
+        argv = ["prog", "--results-dir", str(self.root), "--output-dir", str(out)]
+        with patch.object(sys, "argv", argv), patch("builtins.print"):
+            pm.main()
+        for name in ("multitech_selected_features_dataset", "md_window_unique_dataset", "md_trajectory_dataset"):
+            features = (out / f"{name}_feature_columns.txt").read_text().split()
+            self.assertTrue(features, name)
+            self.assertFalse([col for col in features if "tddft" in col], name)
+            columns = pd.read_csv(out / f"{name}.csv", nrows=0).columns
+            self.assertFalse([col for col in columns if col.startswith("feature_tddft")], name)
+        summary = pd.read_csv(out / "multitech_selected_features_dataset.csv")
+        self.assertIn("tddft_co2_isolated_onset_ev", summary.columns)  # reference column only
+        windows = pd.read_csv(out / "md_window_unique_dataset.csv", nrows=0)
+        self.assertFalse([col for col in windows.columns if "tddft" in col])
+
+    def test_window_site_columns_filled_from_frame_analysis(self):
+        # top_metal seed 1 migrates to the bridge halfway; seed 2 desorbs in the last quarter.
+        directory = self.root / "md" / "ZnO" / "top_metal"
+        rows = []
+        n = 400
+        for seed in SEEDS:
+            for step in range(n):
+                nearest, desorbed = "top_metal", 0
+                if seed == 1 and step >= n // 2:
+                    nearest = "bridge"
+                if seed == 2 and step >= 3 * n // 4:
+                    desorbed = 1
+                rows.append({"seed": seed, "phase": "production", "frame_index": step,
+                             "time_fs": 2.0 * step, "nearest_site": nearest, "desorbed": desorbed})
+        rows.append({"seed": 1, "phase": "equilibration", "frame_index": 0, "time_fs": 0.0,
+                     "nearest_site": "top_oxygen", "desorbed": 1})
+        pd.DataFrame(rows).to_csv(directory / pm.FRAME_ANALYSIS_FILENAME, index=False)
+
+        windows = pm.build_unique_md_window_dataset(self.root, 0, block_length_fs=100.0)
+        top = windows[windows["site"] == "top_metal"].set_index(["seed", "md_window_id"])
+        self.assertTrue(top["window_nearest_site"].ne("").all())
+        self.assertTrue((top["window_site_analysis_coverage"] == 1.0).all())
+        seed1 = top.loc["1"]
+        self.assertEqual(seed1["window_nearest_site"].tolist(), ["top_metal"] * 4 + ["bridge"] * 4)
+        self.assertEqual(seed1["window_start_site_fraction"].tolist(), [1.0] * 4 + [0.0] * 4)
+        self.assertTrue((seed1["window_nearest_site_fraction"] == 1.0).all())
+        seed2 = top.loc["2"]
+        self.assertEqual(seed2["window_desorbed_fraction"].tolist(), [0.0] * 6 + [1.0] * 2)
+        # Sites without the analysis keep empty diagnostics; none is a feature.
+        other = windows[windows["site"] != "top_metal"]
+        self.assertTrue(other["window_desorbed_fraction"].isna().all())
+        self.assertFalse([col for col in pm.WINDOW_SITE_COLUMNS if col.startswith("feature_")])
+        trajectories = pm.build_md_trajectory_dataset(self.root).set_index("group")
+        self.assertAlmostEqual(trajectories.loc["ZnO/top_metal/seed_1", "window_start_site_fraction"], 0.5)
+        self.assertAlmostEqual(trajectories.loc["ZnO/top_metal/seed_2", "window_desorbed_fraction"], 0.25)
+
+
+class TDDFTDatasetTests(unittest.TestCase):
+    def test_tddft_tables_carry_group_and_warning(self):
+        from scripts.datasets import prepare_tddft_qml_dataset as td
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_tddft_summary(root)
+            for site in SITES:
+                directory = root / "tddft" / "ZnO" / site
+                directory.mkdir(parents=True)
+                pd.DataFrame({"transition_index": [0, 1], "energy_ev": [8.5, 9.5],
+                              "oscillator_strength": [0.1, 0.2]}).to_csv(directory / "transitions.csv", index=False)
+            summary = td.read_summary(root / "tddft_summary.csv")
+            built = td.build_summary_dataset(summary)
+            transitions = td.build_transitions_dataset(summary, td.read_transitions(root / "tddft"))
+            with patch("builtins.print") as printed:
+                td.save_dataset(transitions, root / "out" / "transitions.csv")
+        self.assertEqual(sorted(built["group"]), sorted(f"ZnO/{site}" for site in SITES))
+        self.assertEqual(transitions.groupby("group").size().tolist(), [2, 2, 2])
+        self.assertTrue((transitions["group"] == "ZnO/" + transitions["site"]).all())
+        output = " ".join(str(call.args[0]) for call in printed.call_args_list if call.args)
+        self.assertIn("not suitable for site classification", output)
+        self.assertIn("NOT suitable", td.__doc__)
 
 
 class AutocorrelationTests(unittest.TestCase):
