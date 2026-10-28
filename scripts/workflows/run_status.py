@@ -374,8 +374,8 @@ def section_md(ctx: Context, state: str) -> None:
             for seed_dir in seed_dirs:
                 seed = seed_dir.name.removeprefix("seed_")
                 row = summary.get(seed, {})
-                eq = trajectory_frames(seed_dir / "md_equilibration.traj") * interval
-                prod = trajectory_frames(seed_dir / "md_production.traj") * interval
+                eq = md_steps(seed_dir / "md_equilibration.traj", interval)
+                prod = md_steps(seed_dir / "md_production.traj", interval)
                 if row.get("md_status"):
                     progress = ok_badge(row["md_status"])
                 elif state == "running" and (eq or prod):
@@ -386,6 +386,11 @@ def section_md(ctx: Context, state: str) -> None:
                              fmt(row.get("temperature_k_mean"), ".0f"), fmt(row.get("c_min_slab_distance_ang_mean"), ".2f"),
                              fmt(row.get("oco_angle_deg_mean"), ".1f"), progress])
     table(columns, rows)
+
+
+def md_steps(path: Path, interval: int) -> int:
+    """MD steps covered by a trajectory written every `interval` steps (frame 0 is the start)."""
+    return max(trajectory_frames(path) - 1, 0) * interval
 
 
 def trajectory_frames(path: Path) -> int:
@@ -674,12 +679,17 @@ def print_live(ctx: Context) -> None:
         interval = int(as_float(settings.get("log_interval")) or 20)
         eq_target = int(as_float(settings.get("equilibration_steps")) or 0)
         prod_target = int(as_float(settings.get("production_steps") or settings.get("steps")) or 0)
-        eq = trajectory_frames(folder / "md_equilibration.traj") * interval
-        prod = trajectory_frames(folder / "md_production.traj") * interval
-        phase, done, target = ("production", prod, prod_target) if prod else ("equilibration", eq, eq_target)
-        print(f"   stage      {phase}")
+        eq = md_steps(folder / "md_equilibration.traj", interval)
+        prod = md_steps(folder / "md_production.traj", interval)
+        production = (folder / "md_production.traj").is_file()
+        phase, done, target = ("production", prod, prod_target) if production else ("equilibration", eq, eq_target)
+        print(f"   stage      {phase}  ({folder.name})")
         print(f"   progress   {bar(done / target if target else 0.0)}  ~{done}/{target} steps "
-              f"(total {eq + prod}/{eq_target + prod_target})")
+              f"(trajectory {eq + prod}/{eq_target + prod_target})")
+        frames = [line for line in lines_starting(ctx.root / "logs" / "md.log", ("[md] seed=",))]
+        if frames:
+            print("   last frame " + frames[-1].removeprefix("[md] "))
+            print("   " + dim("C-slab > ~4.5 Å means the CO2 has left the surface (desorption)"))
     elif method == "neb":
         settings = ctx.method("neb")
         max_steps = int(as_float(settings.get("max_steps")) or 300)
