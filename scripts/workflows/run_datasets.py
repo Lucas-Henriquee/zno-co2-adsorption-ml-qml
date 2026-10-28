@@ -204,7 +204,17 @@ def collect_inputs(
             except FileNotFoundError:
                 pass
         if "md_windows" in targets:
-            paths.extend(find_md_summaries(source_results))
+            md_tables = find_md_summaries(source_results)
+            paths.extend(md_tables)
+            # Optional per-frame site analysis (scripts/analysis/md_trajectory_analysis.py).
+            paths.extend(
+                path.parent / "md_frame_analysis.csv"
+                for path in md_tables
+                if (path.parent / "md_frame_analysis.csv").is_file()
+            )
+        block_length_fs = settings.get("block_length_fs")
+        if block_length_fs is not None and float(block_length_fs) <= 0:
+            fail("methods.multitech.block_length_fs must be positive or null.")
 
     elif method == "qml_features":
         if ranking_override is not None:
@@ -261,6 +271,7 @@ def build_command(
         ]
         for key, option in [
             ("block_tau_factor", "--block-tau-factor"),
+            ("block_length_fs", "--block-length-fs"),
             ("min_block_length_fs", "--min-block-length-fs"),
             ("equilibration_fs", "--equilibration-fs"),
         ]:

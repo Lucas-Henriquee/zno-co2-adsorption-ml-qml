@@ -38,9 +38,13 @@ methods:
       - md_windows
     # Maximum number of blocks per MD trajectory (seed); 0 = no cap.
     md_windows_per_site: 10
-    # Block length >= block_tau_factor x integrated autocorrelation time of the
-    # most correlated descriptor, and >= min_block_length_fs.
+    # ONE common block length for every trajectory, chosen before labels are used:
+    # block_tau_factor x the largest statistical inefficiency g = 1 + 2 sum rho_k
+    # (Sokal tau_int = g/2) over all trajectories and descriptors, unless
+    # block_length_fs fixes it; then raised to min_block_length_fs. The chosen
+    # value is written to md_window_unique_dataset_metadata.json.
     block_tau_factor: 2.0
+    block_length_fs: null
     min_block_length_fs: 0.0
     # Used only for MD tables without a 'phase' column.
     equilibration_fs: 0.0
