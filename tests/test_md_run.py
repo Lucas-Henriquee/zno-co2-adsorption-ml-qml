@@ -169,7 +169,7 @@ def test_settings_from_run_config_and_legacy_steps(results):
                           "dft": {"ecut_ev": 500.0, "kpoints": [2, 3, 1]}}}
     settings = run_md.resolve_settings(run_md.parse_args([]), config)
     assert settings["production_steps"] == 50 and settings["seeds"] == [3, 4]
-    assert settings["friction_per_fs"] == 0.02 and settings["equilibration_steps"] == 1000
+    assert settings["friction_per_fs"] == 0.02 and settings["equilibration_steps"] == run_md.DEFAULTS["equilibration_steps"]
 
     config["methods"]["md"]["production_steps"] = 80
     assert run_md.resolve_settings(run_md.parse_args(["--steps", "50"]), config)["production_steps"] == 80

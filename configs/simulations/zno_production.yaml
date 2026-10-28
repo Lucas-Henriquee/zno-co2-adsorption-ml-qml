@@ -101,14 +101,16 @@ methods:
     # site (dft_summary.csv: dft_profile); ecut_ev and kpoints must equal methods.dft.
     temperature_kelvin: 300.0
     # Deprecated alias of production_steps, kept for the workflow command line.
-    steps: 2000
-    equilibration_steps: 1000  # 1 ps at 1 fs; written separately, not used for descriptors
-    production_steps: 2000
+    steps: 1500
+    equilibration_steps: 500  # 0.5 ps at 1 fs (5 x the thermostat time); not used for descriptors
+    production_steps: 1500
     timestep_fs: 1.0
     friction_per_fs: 0.01  # Langevin friction in fs^-1 (tau = 100 fs)
     log_interval: 20
     seed: 1234
-    seeds: []  # several seeds -> one independent trajectory each (md/<material>/<site>/seed_<n>)
+    # One independent trajectory per seed (md/<material>/<site>/seed_<n>); the grouped
+    # ML split needs >= 2 per site and grouped CV inside training needs >= 3.
+    seeds: [1234, 2345, 3456]
     nve_test_steps: 200  # only with run_md.py --nve-test
     nve_test_timesteps_fs: [0.5, 1.0]
     ecut_ev: 500.0
