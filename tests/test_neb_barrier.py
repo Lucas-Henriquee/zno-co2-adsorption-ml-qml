@@ -19,28 +19,60 @@ ROOT = Path(__file__).resolve().parents[1]
 
 @unittest.skipIf(ase is None, "ASE is required")
 class BarrierMetricsTests(unittest.TestCase):
-    def test_barrier_excludes_endpoints(self):
-        # Endothermic path: the final endpoint is the global maximum.
+    def test_endothermic_band_uses_endpoint_maximum(self):
+        # The final endpoint is the global maximum: E_max includes the endpoints.
         metrics = run_neb.barrier_metrics([0.0, 0.3, 0.5, 0.4, 0.2, 0.9, 1.2])
-        self.assertEqual(metrics["highest_image_index"], 5)
-        self.assertAlmostEqual(metrics["forward_barrier_eV"], 0.9)
-        self.assertAlmostEqual(metrics["reverse_barrier_eV"], 0.9 - 1.2)
+        self.assertEqual(metrics["highest_image_index"], 6)
+        self.assertEqual(metrics["highest_internal_image_index"], 5)
+        self.assertAlmostEqual(metrics["forward_barrier_eV"], 1.2)
+        self.assertAlmostEqual(metrics["reverse_barrier_eV"], 0.0)
         self.assertAlmostEqual(metrics["reaction_energy_eV"], 1.2)
         self.assertTrue(metrics["no_internal_saddle"])
+        self.assertFalse(metrics["barrier_resolved"])
 
     def test_saddle_and_reverse_barrier(self):
         metrics = run_neb.barrier_metrics([-10.0, -9.8, -9.5, -9.7, -9.9, -9.95, -10.2])
         self.assertEqual(metrics["highest_image_index"], 2)
+        self.assertEqual(metrics["highest_internal_image_index"], 2)
         self.assertAlmostEqual(metrics["forward_barrier_eV"], 0.5)
         self.assertAlmostEqual(metrics["reverse_barrier_eV"], 0.7)
         self.assertAlmostEqual(metrics["reaction_energy_eV"], -0.2)
         self.assertFalse(metrics["no_internal_saddle"])
+        self.assertTrue(metrics["barrier_resolved"])
         self.assertAlmostEqual(metrics["relative_energies"][0], 0.0)
 
-    def test_monotonic_exothermic_profile_is_flagged(self):
+    def test_downhill_profile_has_zero_forward_barrier(self):
         metrics = run_neb.barrier_metrics([0.0, -0.1, -0.2, -0.3])
         self.assertTrue(metrics["no_internal_saddle"])
-        self.assertAlmostEqual(metrics["forward_barrier_eV"], -0.1)
+        self.assertEqual(metrics["highest_image_index"], 0)
+        self.assertAlmostEqual(metrics["forward_barrier_eV"], 0.0)
+        self.assertAlmostEqual(metrics["reverse_barrier_eV"], 0.3)
+        self.assertAlmostEqual(metrics["reverse_barrier_eV"], abs(metrics["reaction_energy_eV"]))
+        self.assertFalse(metrics["barrier_resolved"])
+
+    def test_barriers_are_never_negative(self):
+        for energies in ([0.0, -0.1, -0.2, -0.3], [0.0, 0.3, 1.2], [0.0, 0.02, -0.5], [1.0, 0.5, 0.2, 2.0]):
+            metrics = run_neb.barrier_metrics(energies)
+            self.assertGreaterEqual(metrics["forward_barrier_eV"], 0.0)
+            self.assertGreaterEqual(metrics["reverse_barrier_eV"], abs(min(metrics["reaction_energy_eV"], 0.0)))
+
+    def test_resolution_threshold(self):
+        # A 0.02 eV internal saddle is real in the profile but below the default 0.03 eV.
+        metrics = run_neb.barrier_metrics([0.0, 0.02, -0.5])
+        self.assertFalse(metrics["no_internal_saddle"])
+        self.assertAlmostEqual(metrics["forward_barrier_eV"], 0.02)
+        self.assertAlmostEqual(metrics["barrier_resolution_eV"], 0.03)
+        self.assertFalse(metrics["barrier_resolved"])
+        self.assertTrue(run_neb.barrier_metrics([0.0, 0.02, -0.5], resolution_ev=0.01)["barrier_resolved"])
+
+    def test_resolution_from_yaml_and_default(self):
+        args = run_neb.parse_args([])
+        run_neb.resolve_settings(args, {})
+        self.assertEqual(args.barrier_resolution_ev, run_neb.DEFAULT_BARRIER_RESOLUTION_EV)
+        args = run_neb.parse_args([])
+        run_neb.resolve_settings(args, {"methods": {"neb": {"barrier_resolution_ev": 0.05}}})
+        self.assertEqual(args.barrier_resolution_ev, 0.05)
+        self.assertEqual(run_neb.resolve_barrier_resolution(0.07, ROOT / "results" / "neb" / "ZnO"), 0.07)
 
     def test_invalid_energies(self):
         self.assertIsNone(run_neb.barrier_metrics([0.0, 1.0]))
@@ -180,6 +212,36 @@ class PairSelectionTests(unittest.TestCase):
         args = run_neb.parse_args(["--climb-start-fraction", "1.0"])
         with self.assertRaisesRegex(SystemExit, "climbing-image"):
             run_neb.resolve_settings(args, {})
+
+
+class NebWorkflowCommandTests(unittest.TestCase):
+    """run_simulations.py must pass --no-climb: run_neb.py climbs by default."""
+
+    def neb_command(self, climb):
+        from scripts.workflows import run_simulations as simulations
+
+        config = simulations.load_config(ROOT / "configs/simulations/zno_production.yaml")
+        if climb is None:
+            config["methods"]["neb"].pop("climb", None)
+        else:
+            config["methods"]["neb"]["climb"] = climb
+        return simulations.build_commands("neb", config, ["ZnO"], ["top_metal", "bridge"], 6)[0]
+
+    def test_climb_true_passes_climb(self):
+        command = self.neb_command(True)
+        self.assertIn("--climb", command)
+        self.assertNotIn("--no-climb", command)
+
+    def test_climb_false_passes_no_climb(self):
+        command = self.neb_command(False)
+        self.assertIn("--no-climb", command)
+        self.assertNotIn("--climb", command)
+        if ase is not None:
+            neb_args = command[command.index("--material"):]
+            self.assertFalse(run_neb.parse_args(neb_args).climb)
+
+    def test_missing_climb_keeps_run_neb_default(self):
+        self.assertIn("--climb", self.neb_command(None))
 
 
 if __name__ == "__main__":

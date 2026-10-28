@@ -229,9 +229,26 @@ def write_transitions_csv(path: Path, energies_ev: np.ndarray, f_total: np.ndarr
             writer.writerow([idx, float(energy), float(f), *(float(value) for value in fxyz)])
 
 
+def _legacy_gpaw(*args, **kwargs):
+    """GPAW calculator, requesting the legacy implementation when the installed GPAW knows it.
+
+    gpaw.lrtddft.LrTDDFT works only with the legacy (gpaw.calculator) calculator. Newer GPAW
+    releases accept ``legacy_gpaw=True`` to keep returning it once the new code becomes the
+    default; GPAW 25.7 (the lab version) does not know the keyword and raises TypeError, in
+    which case the call is repeated without it (25.7 always returns the legacy calculator).
+    """
+    from gpaw import GPAW
+
+    try:
+        return GPAW(*args, legacy_gpaw=True, **kwargs)
+    except TypeError:
+        # Any other TypeError is raised again by the plain call below.
+        return GPAW(*args, **kwargs)
+
+
 def _build_isolated_co2_ground_state(xyz_file: Path, out_dir: Path, params: dict):
     from ase.io import read
-    from gpaw import FermiDirac, GPAW
+    from gpaw import FermiDirac
 
     full_atoms = read(xyz_file)
     if len(full_atoms) < 3:
@@ -254,7 +271,7 @@ def _build_isolated_co2_ground_state(xyz_file: Path, out_dir: Path, params: dict
     fd_gpw = out_dir / "co2_isolated_ground.gpw"
 
     # Self-consistent density first, converging only the occupied states (GPAW default).
-    calc = GPAW(
+    calc = _legacy_gpaw(
         mode="fd",
         h=float(params["gs_grid_spacing_ang"]),
         xc=GROUND_STATE_XC,
@@ -273,7 +290,8 @@ def _build_isolated_co2_ground_state(xyz_file: Path, out_dir: Path, params: dict
         txt=str(out_dir / "co2_isolated_bands.txt"),
     )
     calc.write(str(fd_gpw), mode="all")
-    return GPAW(str(fd_gpw), txt=None)
+    # Re-read as the legacy calculator, which is what LrTDDFT needs.
+    return _legacy_gpaw(str(fd_gpw), txt=None)
 
 
 def _valence_electrons(calc) -> float:

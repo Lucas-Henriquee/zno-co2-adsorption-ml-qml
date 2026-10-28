@@ -5,6 +5,13 @@ import csv
 import math
 from pathlib import Path
 
+from scripts.analysis.co2rr_corrections import (
+    CORRECTED_CSV,
+    DEFAULT_VARIANT,
+    UNBOUND_STATUS,
+    VARIANTS,
+    load_corrected_pathway_rows,
+)
 from scripts.common.project_config import EXPLORATORY_SITES, RESULTS_DIR
 
 
@@ -19,6 +26,18 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--results-dir", type=Path, default=RESULTS_DIR)
     parser.add_argument("--output-dir", type=Path, default=ANALYSIS_DIR)
+    parser.add_argument(
+        "--co2rr-variant",
+        choices=sorted(VARIANTS),
+        default=DEFAULT_VARIANT,
+        help=f"Variant of {CORRECTED_CSV} used when that file exists (a: as computed, "
+             "b: quasi-harmonic floor, c: floor + PBE gas corrections; default c).",
+    )
+    parser.add_argument(
+        "--uncorrected",
+        action="store_true",
+        help=f"Use co2rr_pathway_summary.csv even if {CORRECTED_CSV} exists.",
+    )
     return parser.parse_args()
 
 
@@ -261,7 +280,8 @@ def build_pathway_table(
 
         table_row["pathway_status"] = str(pathway.get("pathway_status", "")).strip()
         table_row["energy_basis"] = str(pathway.get("energy_basis", "")).strip()
-        if table_row["pathway_status"] != "ok":
+        # Unbound sites (COOH*/CO* desorbed) keep their dG_* values; their U_L is empty.
+        if table_row["pathway_status"] not in ("ok", UNBOUND_STATUS):
             message = str(pathway.get("error_message", "")).strip()
             if message:
                 table_row["notes"] = f"pathway_{table_row['pathway_status']}: {message}"
@@ -275,6 +295,8 @@ def build_pathway_table(
             str(pathway.get("notes", "")).strip(),
             str(pathway.get("geometry_flags", "")).strip(),
         ]
+        if table_row["pathway_status"] == UNBOUND_STATUS:
+            note_chunks.append("unbound intermediate: excluded from U_L and ranking")
         table_row["notes"] = "; ".join(chunk for chunk in note_chunks if chunk)
 
     return table_rows
@@ -317,7 +339,9 @@ def write_manifest(path: Path) -> None:
         "",
         "## Mechanistic Table Template",
         "- File: `co2rr_pathway_template.csv`",
-        "- Auto-filled from `co2rr_pathway_summary.csv` when pathway simulations exist.",
+        "- Auto-filled from `co2rr_corrected_summary.csv` (variant in `co2rr_variant`, default c) when it exists,",
+        "  else from `co2rr_pathway_summary.csv`; see `co2rr_corrections_note.md` for the corrections.",
+        "- `pathway_status` = `unbound`: COOH* or CO* desorbed; dG_* listed, no U_L, not ranked.",
         "- Pathway: * + CO2(g) -> COOH* -> CO* + H2O(g) -> * + CO(g), computational hydrogen electrode.",
         "- `energy_basis` = `free_energy_CHE`: step columns are `dG_*` (ZPE, heat capacity, -TS; slab frozen).",
         "- `energy_basis` = `electronic_energies_only`: step columns are `dE_*`; these are not free energies.",
@@ -339,7 +363,14 @@ def main() -> None:
 
     dft_rows = read_csv_rows(dft_path)
     tddft_rows = read_csv_rows(tddft_path)
-    pathway_rows = read_csv_rows(pathway_path, required=False)
+    corrected = None if args.uncorrected else load_corrected_pathway_rows(
+        results_dir / CORRECTED_CSV, args.co2rr_variant
+    )
+    if corrected is not None:
+        print(f"[co2-analysis] pathway values from {results_dir / CORRECTED_CSV} (variant {args.co2rr_variant})")
+        pathway_rows = corrected
+    else:
+        pathway_rows = read_csv_rows(pathway_path, required=False)
     merged_rows = merge_dft_tddft(dft_rows=dft_rows, tddft_rows=tddft_rows)
 
     co2_table = analysis_dir / "co2_reduction_table.csv"

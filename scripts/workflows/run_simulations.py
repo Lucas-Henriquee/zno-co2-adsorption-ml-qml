@@ -371,8 +371,8 @@ def build_commands(
                 "--optimizer", optimizer,
                 "--climb-start-fraction", str(climb_start_fraction),
             ]
-            if bool(settings.get("climb", False)):
-                command.append("--climb")
+            # run_neb.py climbs by default, so climb: false must be passed explicitly.
+            command.append("--climb" if bool(settings.get("climb", True)) else "--no-climb")
             if bool(settings.get("parallel_images", False)):
                 command.append("--parallel-images")
             commands.append(command)

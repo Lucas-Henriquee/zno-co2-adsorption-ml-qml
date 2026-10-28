@@ -1,4 +1,4 @@
 ase>=3.23
-gpaw>=24.6.0
+gpaw>=24.6.0,<26.7
 matplotlib>=3.8
 numpy>=1.26

@@ -7,7 +7,9 @@ channels:
 dependencies:
   # Reproducible first-principles stack used by the most recent ZnO runs.
   - python=3.10.*
-  - gpaw=25.7.*=*mpi_openmpi_omp*
+  # Upper bound: run_tddft.py needs the legacy GPAW calculator for LrTDDFT
+  # (legacy_gpaw=True is passed when supported); stay below 26.7 until that is verified.
+  - gpaw[version='>=25.7,<26.7',build='*mpi_openmpi_omp*']
   - gpaw-data=1.0.*
   - ase=3.28.*
   - numpy=2.2.*
