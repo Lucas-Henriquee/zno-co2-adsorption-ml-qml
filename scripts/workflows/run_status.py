@@ -429,12 +429,15 @@ def section_neb(ctx: Context, state: str) -> None:
         for pair in dict.fromkeys(configured + sorted(found)):
             folder = base / pair
             record = {**load_json(folder / "neb_run_summary.json"), **summary.get(pair, {})}
+            record.update(neb_barriers(folder, settings))
             steps = "—"
             if record.get("status"):
                 steps = f"{fmt(record.get('n_steps_plain'), '.0f')}+{fmt(record.get('n_steps_ci'), '.0f')}"
                 progress = ok_badge(str(record["status"]))
                 if str(record.get("no_internal_saddle")).lower() == "true":
                     progress += dim("  no internal saddle")
+                elif str(record.get("barrier_resolved")).lower() == "false":
+                    progress += dim("  barrier below resolution")
             elif state == "running" and (folder / "neb_opt.log").is_file():
                 optimizer = str(settings.get("optimizer", "FIRE"))
                 count, fmax = optimizer_progress(folder / "neb_opt.log", optimizer)
@@ -446,6 +449,23 @@ def section_neb(ctx: Context, state: str) -> None:
             rows.append([f"{material} {pair.replace('_to_', ' → ')}", fmt(record.get("forward_barrier_eV")),
                          fmt(record.get("reverse_barrier_eV")), fmt(record.get("reaction_energy_eV")), steps, progress])
     table(columns, rows)
+
+
+def neb_barriers(folder: Path, settings: dict[str, Any]) -> dict[str, Any]:
+    """Barrier metrics recomputed from the final band (endpoint-inclusive definition)."""
+    path = folder / "neb_final_images.traj"
+    if not path.is_file():
+        return {}
+    try:
+        from ase.io import read
+
+        from scripts.simulations.neb.run_neb import DEFAULT_BARRIER_RESOLUTION_EV, barrier_metrics
+
+        energies = [image.get_potential_energy() for image in read(str(path), index=":")]
+        resolution = float(settings.get("barrier_resolution_ev", DEFAULT_BARRIER_RESOLUTION_EV))
+        return barrier_metrics(energies, resolution) or {}
+    except Exception:
+        return {}
 
 
 SECTIONS: dict[str, Callable[[Context, str], None]] = {

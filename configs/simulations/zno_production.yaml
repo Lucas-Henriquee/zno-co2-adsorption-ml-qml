@@ -130,6 +130,8 @@ methods:
     climb: true
     climb_start_fraction: 0.30
     parallel_images: true
+    # Barriers at or below this value (SCF/fmax noise, ~kT at 300 K) are reported as not resolved.
+    barrier_resolution_ev: 0.03
     # Endpoint single points must reproduce the DFT run within these tolerances.
     endpoint_energy_tol_ev: 0.02
     endpoint_force_factor: 1.5
