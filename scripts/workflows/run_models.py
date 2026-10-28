@@ -26,6 +26,13 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG = PROJECT_ROOT / "configs" / "models" / "zno_local.yaml"
 VALID_METHODS = ("svm", "qsvm", "local", "ibm-plan", "ibm")
 BENCHMARK_MODULE = "scripts.models.benchmarks.run_benchmarks"
+EVALUATION_MODULE = "scripts.models.evaluate_grouped"
+# holdout: single grouped train/test split per seed (run_benchmarks only).
+# grouped_27 (alias grouped): additionally run evaluate_grouped, i.e. every
+# one-trajectory-per-class-out split (27 for 3 sites x 3 seeds), LOTO, nested
+# grouped CV, trajectory-level permutation test and paired comparisons.
+VALID_PROTOCOLS = ("holdout", "grouped_27", "grouped")
+EVALUATION_MODELS = ("majority", "nearest_centroid", "logistic", "linear_svm", "svm_rbf", "qsvm")
 
 
 def parse_args() -> argparse.Namespace:
@@ -50,6 +57,11 @@ def parse_args() -> argparse.Namespace:
         "--dry-run",
         action="store_true",
         help="Validate and print the benchmark command without creating files.",
+    )
+    parser.add_argument(
+        "--protocol",
+        choices=VALID_PROTOCOLS,
+        help="Override evaluation.protocol (holdout or grouped_27) for svm, qsvm and local.",
     )
     parser.add_argument("--list-methods", action="store_true")
     return parser.parse_args()
@@ -230,16 +242,18 @@ def build_command(
         "--seeds", *numbers(require_list(split, "seeds", "split")),
         "--test-size", str(float(split.get("test_size", 0.25))),
         "--max-samples", str(int(split.get("max_samples", 0))),
+        "--ibm-max-samples", str(int(ibm.get("max_samples", 12))),
+        "--ibm-kernel-diagonal", str(ibm.get("kernel_diagonal", "ideal")),
         "--svm-kernels", *strings(require_list(svm, "kernels", "svm")),
         "--svm-scalers", *strings(require_list(svm, "scalers", "svm")),
         "--svm-gamma", str(svm.get("gamma", "scale")),
         "--svm-degree", str(int(svm.get("degree", 3))),
-        "--svm-cv", str(int(svm.get("cv_folds", 5))),
+        "--svm-cv", str(int(svm.get("cv_folds", common.get("cv_folds", 5)))),
         "--qsvm-scalers", *strings(require_list(qsvm, "scalers", "qsvm")),
         "--entanglements", *strings(require_list(qsvm, "entanglements", "qsvm")),
         "--reps", *numbers(require_list(qsvm, "reps", "qsvm")),
         "--qsvm-qubits", *numbers(require_list(qsvm, "qubits", "qsvm")),
-        "--qsvm-cv", str(int(qsvm.get("cv_folds", 0))),
+        "--qsvm-cv", str(int(qsvm.get("cv_folds", common.get("cv_folds", 5)))),
         "--qsvm-simulators", *strings(require_list(qsvm, "simulators", "qsvm")),
         "--mps-max-bond-dimension", str(int(qsvm.get("mps_max_bond_dimension", 0))),
         "--mps-truncation-threshold", str(float(qsvm.get("mps_truncation_threshold", 0.0))),
@@ -271,6 +285,85 @@ def build_command(
         command.extend(["--ibm-instance", str(ibm["instance"])])
     if bool(ibm.get("force_ipv4", False)):
         command.append("--force-ipv4")
+    return command
+
+
+def evaluation_protocol(config: dict[str, Any], override: str | None) -> str:
+    evaluation = config.get("evaluation") or {}
+    if not isinstance(evaluation, dict):
+        fail("Configuration field 'evaluation' must be a mapping.")
+    protocol = str(override or evaluation.get("protocol", "holdout"))
+    if protocol not in VALID_PROTOCOLS:
+        fail(f"Unknown evaluation.protocol: {protocol}; use one of {', '.join(VALID_PROTOCOLS)}.")
+    return "grouped_27" if protocol == "grouped" else protocol
+
+
+def evaluation_models(config: dict[str, Any], models: list[str]) -> list[str]:
+    """Models of evaluate_grouped for a method: svm drops qsvm, qsvm keeps qsvm and majority."""
+    evaluation = config.get("evaluation") or {}
+    configured = strings(evaluation.get("models", list(EVALUATION_MODELS)))
+    unknown = sorted(set(configured) - set(EVALUATION_MODELS))
+    if unknown:
+        fail(f"Unknown evaluation.models: {unknown}")
+    if models == ["svm"]:
+        return [name for name in configured if name != "qsvm"]
+    if models == ["qsvm"]:
+        return [name for name in configured if name in {"majority", "qsvm"}] or ["qsvm"]
+    return configured
+
+
+def build_evaluation_command(
+    config: dict[str, Any],
+    models: list[str],
+    dataset: Path,
+    run_dir: Path,
+) -> list[str]:
+    """Command for the grouped evaluation protocol (scripts.models.evaluate_grouped)."""
+    input_config = require_mapping(config, "input")
+    common = require_mapping(config, "common")
+    qsvm = require_mapping(config, "qsvm")
+    evaluation = config.get("evaluation") or {}
+    selected = evaluation_models(config, models)
+    feature_sets = strings(require_list(common, "feature_sets", "common"))
+    command = [
+        sys.executable,
+        "-m",
+        EVALUATION_MODULE,
+        "--csv", str(dataset),
+        "--label", str(input_config.get("label", "label_site_id")),
+        "--group-column", str(input_config.get("group_column", "group")),
+        "--feature-set", feature_sets[0],
+        "--models", *selected,
+        "--outer", str(evaluation.get("outer", "both")),
+        "--preprocessing", str(evaluation.get("preprocessing", "power_minmax")),
+        "--tuning", str(evaluation.get("tuning", "nested")),
+        "--class-weight", str(common.get("class_weight", "balanced")),
+        "--n-permutations", str(int(evaluation.get("n_permutations", 1000))),
+        "--n-jobs", str(int(evaluation.get("n_jobs", 1))),
+        "--random-state", str(int(evaluation.get("random_state", 42))),
+        "--output-dir", str(run_dir / "evaluation"),
+        "--run-name", "grouped_eval",
+    ]
+    if "qsvm" in selected:
+        qubits = require_list(qsvm, "qubits", "qsvm")
+        reps = require_list(qsvm, "reps", "qsvm")
+        entanglements = require_list(qsvm, "entanglements", "qsvm")
+        command += [
+            "--qsvm-kernel", str(evaluation.get("qsvm_kernel", "statevector")),
+            "--qsvm-qubits", str(int(qubits[0])),
+            "--qsvm-reps", str(int(reps[0])),
+            "--qsvm-entanglement", str(entanglements[0]),
+        ]
+    permuted = [name for name in strings(evaluation.get("permutation_models", [])) if name in selected]
+    if permuted:
+        command += ["--permutation-models", *permuted]
+    if "compare" in evaluation:
+        compare = [pair for pair in strings(evaluation.get("compare") or [])
+                   if all(name in selected for name in pair.split(":"))]
+        command += ["--compare", *compare]
+    for key, flag in (("param_grid", "--param-grid"), ("fixed_params", "--fixed-params")):
+        if evaluation.get(key):
+            command += [flag, json.dumps(evaluation[key])]
     return command
 
 
@@ -377,6 +470,13 @@ def main() -> None:
         hardware_mode,
         args.backend,
     )
+    protocol = evaluation_protocol(config, args.protocol)
+    # The grouped protocol is local only; IBM methods keep the hardware holdout.
+    evaluation_command = (
+        build_evaluation_command(config, models, dataset, run_dir)
+        if protocol == "grouped_27" and "qsvm_ibm" not in models
+        else None
+    )
 
     print(f"[plan] config: {config['_config_path']}")
     print(f"[plan] mode: {mode}")
@@ -386,6 +486,9 @@ def main() -> None:
     print(f"[plan] class counts: {dataset_summary['class_counts']}")
     print(f"[plan] output: {run_dir}")
     print(f"[plan] command: {shlex.join(command)}")
+    print(f"[plan] protocol: {protocol}")
+    if evaluation_command is not None:
+        print(f"[plan] evaluation command: {shlex.join(evaluation_command)}")
     if plan_only:
         print("[plan] IBM mode: offline command and workload planning only.")
     if hardware_mode:
@@ -427,13 +530,19 @@ def main() -> None:
             **dataset_summary,
         },
         "command": command,
+        "protocol": protocol,
+        "evaluation_command": evaluation_command,
         "output_directory": str(run_dir),
     }
     write_manifest(manifest_path, manifest)
 
     try:
         run_command(command, run_dir / "logs" / "models.log")
+        if evaluation_command is not None:
+            run_command(evaluation_command, run_dir / "logs" / "evaluation.log")
         outputs = output_inventory(run_dir / "benchmark")
+        if evaluation_command is not None:
+            outputs += output_inventory(run_dir / "evaluation")
         if not outputs:
             raise RuntimeError("Benchmark completed without producing output files.")
         manifest["outputs"] = outputs

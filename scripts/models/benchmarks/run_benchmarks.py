@@ -70,10 +70,26 @@ def parse_args():
     p.add_argument("--ibm-feature-sets", nargs="+", default=["md3"], choices=sorted(FEATURE_SETS))
     p.add_argument("--seeds", nargs="+", type=int, default=[42])
     p.add_argument("--test-size", type=float, default=0.25)
-    p.add_argument("--max-samples", type=int, default=12, help="Shared sample limit, spread over as many groups as possible. 0 = full data.")
+    p.add_argument(
+        "--max-samples",
+        type=int,
+        default=0,
+        help="Sample limit for the local SVM/QSVM runs, spread over as many groups as possible. 0 = every row (default).",
+    )
+    p.add_argument(
+        "--ibm-max-samples",
+        type=int,
+        default=12,
+        help=(
+            "Separate, explicit subsample for IBM hardware runs (default 12). When it differs "
+            "from --max-samples and qsvm is selected, a matched local QSVM is also run on the "
+            "IBM split so the local/IBM kernel comparison uses identical rows."
+        ),
+    )
 
     p.add_argument("--svm-kernels", nargs="+", default=["rbf"], choices=ALL_SVM_KERNELS)
-    p.add_argument("--svm-scalers", nargs="+", default=["power"], choices=ALL_SCALERS)
+    # SVM and QSVM share the default preprocessing (power transform, MinMax to [0, pi]) and CV folds.
+    p.add_argument("--svm-scalers", nargs="+", default=["power_minmax"], choices=ALL_SCALERS)
     p.add_argument("--svm-gamma", default="scale", help="'scale', 'auto', or a positive float.")
     p.add_argument("--svm-degree", type=int, default=3)
     p.add_argument("--svm-cv", type=int, default=5)
@@ -82,7 +98,7 @@ def parse_args():
     p.add_argument("--entanglements", nargs="+", default=["linear"], choices=ALL_ENTANGLEMENTS)
     p.add_argument("--reps", nargs="+", type=int, default=[1])
     p.add_argument("--qsvm-qubits", nargs="+", type=int, default=[0], help="0 = number of features.")
-    p.add_argument("--qsvm-cv", type=int, default=0)
+    p.add_argument("--qsvm-cv", type=int, default=5)
     p.add_argument("--qsvm-simulators", nargs="+", default=["reference"], choices=["reference", "aer_mps"], help="Local QSVM simulation implementation(s).",)
     p.add_argument("--mps-max-bond-dimension", type=int, default=0, help="Passed to aer_mps; 0 = unlimited/exact main benchmark.",)
     p.add_argument("--mps-truncation-threshold", type=float, default=0.0, help="Passed to aer_mps; 0 avoids deliberate MPS truncation.",)
@@ -107,7 +123,30 @@ def parse_args():
 
     p.add_argument("--C", type=float, default=1.0)
     p.add_argument("--class-weight", default="balanced", choices=["balanced", "none"])
-    p.add_argument("--full-grid", action="store_true", help="Expand to all supported local scalers/kernels/topologies and common qubit settings.")
+    p.add_argument(
+        "--full-grid",
+        action="store_true",
+        help=(
+            "Expand to all supported local scalers/kernels/topologies and common qubit settings. "
+            "Every configuration is reported; none is selected by its test score (the test "
+            "split must not choose the model). Add --select-by-cv to pick one per model by "
+            "grouped CV on the training trajectories."
+        ),
+    )
+    p.add_argument(
+        "--select-by-cv",
+        action="store_true",
+        help=(
+            "Write cv_selection.csv with, per model type and feature set, the configuration "
+            "with the best training-set grouped CV balanced accuracy (test scores are not used)."
+        ),
+    )
+    p.add_argument(
+        "--ibm-kernel-diagonal",
+        default="ideal",
+        choices=["ideal", "measured", "measured_normalized"],
+        help="Passed to qsvm_ibm_hardware.py --kernel-diagonal (default ideal = unchanged).",
+    )
     p.add_argument("--plan-only", action="store_true", help="Print commands but do not execute any model.")
     p.add_argument("--timeout", type=float, default=300.0, help="Per-run timeout in seconds for SVM/QSVM local runs. 0 disables it.",)
     p.add_argument("--hardware-timeout", type=float, default=0.0, help=("Timeout for a REAL IBM hardware client process. 0 disables it recommended because killing the client does not necessarily cancel an already submitted Runtime job."),)
@@ -425,9 +464,12 @@ def annotate_local_ibm_comparisons(records: list[dict]) -> None:
             ibm_row["fairness_issues"] = "no local QSVM candidate with the same feature set, qubits and split seed"
             continue
 
-        # Prefer the exact reference implementation when several local
-        # simulators were requested.
-        candidates.sort(key=lambda row: row.get("simulator") != "reference")
+        # Prefer a local run on the same split (rows), then the exact reference
+        # implementation when several local simulators were requested.
+        candidates.sort(key=lambda row: (
+            row.get("split_sha256") != ibm_row.get("split_sha256"),
+            row.get("simulator") != "reference",
+        ))
         local_row = candidates[0]
         issues = [
             f"{field}: local={local_row.get(field)!r}, IBM={ibm_row.get(field)!r}"
@@ -561,6 +603,34 @@ def build_shot_sensitivity(records: list[dict]) -> list[dict]:
     return output
 
 
+FULL_GRID_NOTICE = """\
+This suite expanded the full configuration grid. Every configuration is reported
+in benchmark_summary.csv; no configuration is selected by its test score. Picking
+the "best" row by test_balanced_accuracy would select on the test split and
+overstate performance. Select by training-set grouped CV (--select-by-cv,
+cv_selection.csv) or, better, evaluate the candidate models with
+scripts.models.evaluate_grouped (nested grouped CV over all outer splits).
+"""
+
+
+def select_by_cv(summary: pd.DataFrame) -> pd.DataFrame:
+    """Per model type and feature set, the run with the best training-set grouped CV score.
+
+    Only ``cv_balanced_accuracy_mean`` is used for the choice; test metrics are
+    carried along for reporting. Rows without a CV score are never selected.
+    """
+    columns = ["requested_model", "feature_set", "cv_balanced_accuracy_mean"]
+    if not set(columns) <= set(summary.columns):
+        return pd.DataFrame(columns=columns)
+    usable = summary.dropna(subset=["cv_balanced_accuracy_mean"])
+    usable = usable[usable["requested_model"].isin(["svm", "qsvm"])]
+    if usable.empty:
+        return pd.DataFrame(columns=columns)
+    best = usable.sort_values("cv_balanced_accuracy_mean", ascending=False, kind="mergesort")
+    best = best.groupby(["requested_model", "feature_set"], sort=True).head(1)
+    return best.assign(selection_criterion="max cv_balanced_accuracy_mean (training trajectories only)")
+
+
 def main():
     args = parse_args()
 
@@ -582,8 +652,8 @@ def main():
 
     if not 0.0 < args.test_size < 1.0:
         raise SystemExit("--test-size must be between 0 and 1.")
-    if args.max_samples < 0:
-        raise SystemExit("--max-samples must be >= 0.")
+    if args.max_samples < 0 or args.ibm_max_samples < 0:
+        raise SystemExit("--max-samples and --ibm-max-samples must be >= 0.")
     if args.C <= 0 or args.ibm_trials < 1 or args.max_circuits_per_job < 1:
         raise SystemExit("--C, --ibm-trials and --max-circuits-per-job must be positive.")
     if any(value < 0 for value in args.qsvm_qubits + args.ibm_qubits):
@@ -634,8 +704,8 @@ def main():
             "every IBM run uses the same QPU."
         )
 
-    if args.submit_hardware and "qsvm_ibm" in models and (args.max_samples <= 0 or args.max_samples > 100) and not args.allow_large_hardware:
-        raise SystemExit("Refusing a large IBM submission. Use a small --max-samples or explicitly add --allow-large-hardware.")
+    if args.submit_hardware and "qsvm_ibm" in models and (args.ibm_max_samples <= 0 or args.ibm_max_samples > 100) and not args.allow_large_hardware:
+        raise SystemExit("Refusing a large IBM submission. Use a small --ibm-max-samples or explicitly add --allow-large-hardware.")
 
     index = 1
     while (args.output_root / f"benchmark_{index:02d}").exists():
@@ -654,13 +724,14 @@ def main():
     if missing_scripts:
         raise SystemExit("Missing benchmark scripts: " + ", ".join(missing_scripts))
 
-    split_cache: dict[tuple[str, int], Path] = {}
-    def split_for(feature_set: str, seed: int) -> Path:
-        key = (feature_set, seed)
+    split_cache: dict[tuple[str, int, int], Path] = {}
+    def split_for(feature_set: str, seed: int, max_samples: int | None = None) -> Path:
+        limit = args.max_samples if max_samples is None else max_samples
+        key = (feature_set, seed, limit)
         if key not in split_cache:
             try:
                 split_cache[key] = create_split(
-                    args.csv, args.label, feature_set, args.max_samples, args.test_size, seed, split_dir, args.group_column
+                    args.csv, args.label, feature_set, limit, args.test_size, seed, split_dir, args.group_column
                 )
             except ValueError as exc:
                 raise SystemExit(f"[error] Cannot build a grouped split for {feature_set}: {exc}") from exc
@@ -731,6 +802,29 @@ def main():
                 "--run-name", run_name,
             ]))
 
+    if "qsvm" in models and "qsvm_ibm" in models and args.ibm_max_samples != args.max_samples:
+        # Matched local QSVM on the IBM subsample: same rows as the hardware runs.
+        seen_matched = set()
+        for fs, scaler, ent, reps, nq, seed in itertools.product(
+            args.ibm_feature_sets, args.qsvm_scalers, args.entanglements, args.reps, args.ibm_qubits, args.seeds,
+        ):
+            n_features = len(FEATURE_SETS[fs])
+            resolved = n_features if nq == 0 else nq
+            if resolved < n_features or (fs, scaler, ent, reps, resolved, seed) in seen_matched:
+                continue
+            seen_matched.add((fs, scaler, ent, reps, resolved, seed))
+            split = split_for(fs, seed, args.ibm_max_samples)
+            run_name = f"qsvm_{fs}_{resolved}q_{ent}_r{reps}_{scaler}_reference_seed{seed}_ibmsplit"
+            commands.append(("qsvm", [
+                py, str(scripts["qsvm"]), "--csv", str(args.csv), "--label", args.label,
+                "--group-column", args.group_column, "--feature-set", fs, "--scaler", scaler,
+                "--entanglement", ent, "--reps", str(reps), "--n-qubits", str(nq), "--C", str(args.C),
+                "--class-weight", args.class_weight, "--cv", str(args.qsvm_cv), "--simulator", "reference",
+                "--split-file", str(split), "--random-state", str(seed), "--test-size", str(args.test_size),
+                "--max-samples", str(args.ibm_max_samples), "--output-dir", str(suite_dir / "qsvm"),
+                "--run-name", run_name,
+            ]))
+
     if "qsvm_ibm" in models:
         seen_ibm = set()
         for fs, scaler, ent, reps, nq, shots, seed, trial in itertools.product(
@@ -752,11 +846,13 @@ def main():
             if config_key in seen_ibm:
                 continue
             seen_ibm.add(config_key)
-            split = split_for(fs, seed)
+            split = split_for(fs, seed, args.ibm_max_samples)
             split_table = pd.read_csv(split)
             n_train = int((split_table["split"] == "train").sum())
             n_test = int((split_table["split"] == "test").sum())
-            fidelity_circuits = n_train * (n_train - 1) // 2 + n_test * n_train
+            fidelity_circuits = n_train * (n_train - 1) // 2 + n_test * n_train + {
+                "ideal": 0, "measured": n_train, "measured_normalized": n_train + n_test,
+            }[args.ibm_kernel_diagonal]
             hardware_plan.append({
                 "feature_set": fs,
                 "n_qubits": resolved,
@@ -783,7 +879,8 @@ def main():
                 "--split-file", str(split),
                 "--random-state", str(seed),
                 "--test-size", str(args.test_size),
-                "--max-samples", str(args.max_samples),
+                "--max-samples", str(args.ibm_max_samples),
+                "--kernel-diagonal", args.ibm_kernel_diagonal,
                 "--optimization-level", str(args.optimization_level),
                 "--max-circuits-per-job", str(args.max_circuits_per_job),
                 "--transpiler-seed", str(args.transpiler_seed),
@@ -882,6 +979,7 @@ def main():
             "split_strategy",
             "train_groups",
             "test_groups",
+            "cv_balanced_accuracy_mean",
             "preprocessing_time_s",
             "kernel_time_s",
             "training_time_s",
@@ -907,6 +1005,13 @@ def main():
             suite_dir / "engineering_comparison.csv",
             index=False,
         )
+        if args.select_by_cv:
+            selection = select_by_cv(summary_df)
+            selection.to_csv(suite_dir / "cv_selection.csv", index=False)
+            print(f"CV-based selection (test scores not used): {suite_dir / 'cv_selection.csv'}")
+    if args.full_grid:
+        (suite_dir / "FULL_GRID_NOTICE.txt").write_text(FULL_GRID_NOTICE, encoding="utf-8")
+        print("[full-grid] " + " ".join(FULL_GRID_NOTICE.split()))
     if shot_sensitivity:
         pd.DataFrame(shot_sensitivity).to_csv(
             suite_dir / "shot_sensitivity.csv",

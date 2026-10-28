@@ -29,7 +29,9 @@ split:
   # otherwise the run stops with an explanation instead of splitting windows.
   seeds: [42]
   test_size: 0.25
-  max_samples: 12
+  # 0 = every window for the local SVM/QSVM runs; the hardware subsample is
+  # ibm.max_samples.
+  max_samples: 0
 
 common:
   feature_sets: [md3]
@@ -38,25 +40,38 @@ common:
 
 svm:
   kernels: [rbf]
-  scalers: [power]
+  # Same preprocessing as the QSVM (power transform, MinMax to [0, pi]) so the
+  # models differ only in the kernel.
+  scalers: [power_minmax]
   gamma: scale
   degree: 3
-  # Grouped CV folds (StratifiedGroupKFold) on the training trajectories;
-  # reduced to the training trajectories per site, 0 disables.
-  cv_folds: 3
+  # Grouped CV folds (StratifiedGroupKFold) on the training trajectories,
+  # identical for SVM and QSVM; reduced to the training trajectories per site,
+  # 0 disables. Holdout scripts report CV but keep C/gamma fixed; tuning is
+  # done by the grouped protocol (evaluation.tuning: nested).
+  cv_folds: 5
 
 qsvm:
   scalers: [power_minmax]
   entanglements: [linear]
   reps: [1]
   qubits: [0]
-  cv_folds: 0
+  cv_folds: 5
   simulators: [reference]
   mps_max_bond_dimension: 0
   mps_truncation_threshold: 0.0
 
 ibm:
   feature_sets: [md3]
+  # Explicit small subsample for hardware only (spread over as many trajectories
+  # as possible). A matched local QSVM is run on the same rows. Hardware results
+  # are a feasibility demonstration, not a statistical accuracy estimate.
+  max_samples: 12
+  # ideal (unchanged): training diagonal K(x,x) fixed to 1, while test entries
+  # are noisy hardware estimates (K(x,x) < 1 on hardware). measured: measure the
+  # training diagonal; measured_normalized: measure train and test diagonals and
+  # normalise both kernels by sqrt(K(x,x) K(y,y)). Both add circuits.
+  kernel_diagonal: ideal
   qubits: [3]
   shots: [512]
   # Set a backend explicitly before any repeated or real hardware study.
@@ -68,3 +83,8 @@ ibm:
   max_circuits_per_job: 100
   trials: 1
   force_ipv4: false
+
+evaluation:
+  # The ibm and ibm-plan methods always use the hardware holdout; the grouped
+  # protocol (grouped_27) applies to the svm, qsvm and local methods only.
+  protocol: holdout

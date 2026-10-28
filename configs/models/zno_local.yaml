@@ -39,11 +39,15 @@ common:
 
 svm:
   kernels: [rbf]
-  scalers: [power]
+  # Same preprocessing as the QSVM (power transform, MinMax to [0, pi]) so the
+  # models differ only in the kernel.
+  scalers: [power_minmax]
   gamma: scale
   degree: 3
-  # Grouped CV folds (StratifiedGroupKFold) on the training trajectories;
-  # reduced to the training trajectories per site, 0 disables.
+  # Grouped CV folds (StratifiedGroupKFold) on the training trajectories,
+  # identical for SVM and QSVM; reduced to the training trajectories per site,
+  # 0 disables. Holdout scripts report CV but keep C/gamma fixed; tuning is
+  # done by the grouped protocol (evaluation.tuning: nested).
   cv_folds: 5
 
 qsvm:
@@ -51,13 +55,22 @@ qsvm:
   entanglements: [linear]
   reps: [1]
   qubits: [0]
-  cv_folds: 0
+  cv_folds: 5
   simulators: [reference]
   mps_max_bond_dimension: 0
   mps_truncation_threshold: 0.0
 
 ibm:
   feature_sets: [md3]
+  # Explicit small subsample for hardware only (spread over as many trajectories
+  # as possible). A matched local QSVM is run on the same rows. Hardware results
+  # are a feasibility demonstration, not a statistical accuracy estimate.
+  max_samples: 12
+  # ideal (unchanged): training diagonal K(x,x) fixed to 1, while test entries
+  # are noisy hardware estimates (K(x,x) < 1 on hardware). measured: measure the
+  # training diagonal; measured_normalized: measure train and test diagonals and
+  # normalise both kernels by sqrt(K(x,x) K(y,y)). Both add circuits.
+  kernel_diagonal: ideal
   qubits: [3]
   shots: [512]
   backend: null
@@ -68,3 +81,25 @@ ibm:
   max_circuits_per_job: 100
   trials: 1
   force_ipv4: false
+
+evaluation:
+  # holdout: only the single grouped train/test split above (run_benchmarks).
+  # grouped_27: also run scripts.models.evaluate_grouped, the protocol used to
+  # report accuracy: every split leaving one trajectory per site out (27 for
+  # 3 sites x 3 seeds; in general the product of trajectories per site) plus
+  # leave-one-trajectory-out, the same preprocessing for every model, nested
+  # grouped CV for hyperparameters, a trajectory-level permutation test and
+  # paired QSVM vs SVM comparisons. Not used by the ibm/ibm-plan methods.
+  protocol: grouped_27
+  outer: both            # one_per_class | loto | both (LOTO gives the exact CI)
+  preprocessing: power_minmax   # fitted on training rows only, identical for all models
+  tuning: nested         # nested grouped CV inside the training trajectories; or fixed
+  models: [majority, nearest_centroid, logistic, linear_svm, svm_rbf, qsvm]
+  qsvm_kernel: statevector      # ZZ feature map of qsvm.{qubits,reps,entanglements}[0]
+  # 3 x 3 trajectories have 280 distinct partitions into classes, so 1000 means
+  # exact enumeration of all of them. Each one reruns the full protocol.
+  n_permutations: 1000
+  permutation_models: [svm_rbf, qsvm]
+  compare: ["qsvm:svm_rbf"]
+  n_jobs: -1
+  random_state: 42

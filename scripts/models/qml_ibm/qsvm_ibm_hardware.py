@@ -1,3 +1,29 @@
+"""Quantum-kernel SVM on IBM Quantum hardware (feasibility demonstration).
+
+Kernel entries are fidelities |<phi(x)|phi(y)>|^2 estimated by compute-uncompute
+circuits as the frequency of the all-zero bitstring. On noisy hardware this
+estimate is biased low: even K(x, x), ideally 1, comes out below 1 (decoherence,
+gate and readout errors) and fluctuates with shot noise.
+
+By default (``--kernel-diagonal ideal``, unchanged behaviour) the training
+diagonal is fixed to 1 without running circuits, while every off-diagonal
+training entry and every test entry is a noisy hardware estimate. Training and
+test kernels are therefore not treated identically: the training Gram matrix has
+an exact diagonal that the test rows never see. Two options make the treatment
+consistent, at the cost of extra circuits:
+
+* ``measured``: run the n_train self-fidelity circuits and put the measured
+  values on the training diagonal (test entries unchanged).
+* ``measured_normalized``: also run the n_test self-fidelity circuits and apply
+  the same normalisation to train and test, K'(x, y) = K(x, y) / sqrt(K(x, x) K(y, y)),
+  so both use hardware estimates scaled in the same way.
+
+With the small subsamples affordable on hardware (``--max-samples`` 12 by
+default) and a single grouped split, the hardware results are a feasibility
+demonstration, not a statistically meaningful accuracy estimate. Use
+scripts.models.evaluate_grouped for the trajectory-level evaluation.
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -67,6 +93,9 @@ FEATURE_SETS = {
 
 SCALERS = ["none", "standard", "minmax", "minmax_pi", "power", "power_minmax"]
 ENTANGLEMENTS = ["linear", "circular", "full"]
+KERNEL_DIAGONAL_MODES = ["ideal", "measured", "measured_normalized"]
+# Lower bound on measured self-fidelities used for normalisation.
+MIN_SELF_FIDELITY = 1e-3
 
 
 def parse_args():
@@ -80,7 +109,12 @@ def parse_args():
     )
     parser.add_argument("--feature-set", default="md3", choices=sorted(FEATURE_SETS))
     parser.add_argument("--features", nargs="+", default=None)
-    parser.add_argument("--max-samples", type=int, default=12)
+    parser.add_argument(
+        "--max-samples",
+        type=int,
+        default=12,
+        help="Small hardware subsample (spread over as many trajectories as possible); 0 = all rows.",
+    )
     parser.add_argument("--test-size", type=float, default=0.25)
     parser.add_argument("--split-file", type=Path, default=None, help="Optional CSV with row_id and split=train/test; must not share groups.")
     parser.add_argument("--scaler", default="power_minmax", choices=SCALERS)
@@ -100,6 +134,17 @@ def parse_args():
     parser.add_argument("--transpiler-seed", type=int, default=42, help="Fixes stochastic transpiler choices across shot-sensitivity runs.",)
     parser.add_argument("--max-circuits-per-job", type=int, default=100)
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--kernel-diagonal",
+        default="ideal",
+        choices=KERNEL_DIAGONAL_MODES,
+        help=(
+            "ideal (default, unchanged): training diagonal fixed to 1, test entries noisy. "
+            "measured: measure K(x,x) on hardware for the training diagonal. "
+            "measured_normalized: measure K(x,x) for train and test points and normalise "
+            "both kernels by sqrt(K(x,x) K(y,y))."
+        ),
+    )
 
     parser.add_argument("--classical-kernel", default="rbf", choices=["linear", "rbf", "poly", "sigmoid"])
     parser.add_argument("--classical-gamma", default="scale")
@@ -625,14 +670,61 @@ def build_hardware_executor(
     return sampler, pass_manager
 
 
-def estimate_kernel_entries(n_train: int, n_test: int) -> dict:
+def estimate_kernel_entries(n_train: int, n_test: int, kernel_diagonal: str = "ideal") -> dict:
     train_pairs = n_train * (n_train - 1) // 2
     test_pairs = n_test * n_train
+    diagonal = {"ideal": 0, "measured": n_train, "measured_normalized": n_train + n_test}[kernel_diagonal]
     return {
         "train_off_diagonal_pairs": int(train_pairs),
         "test_train_pairs": int(test_pairs),
-        "approx_total_fidelity_entries": int(train_pairs + test_pairs),
+        "self_fidelity_circuits": int(diagonal),
+        "approx_total_fidelity_entries": int(train_pairs + test_pairs + diagonal),
     }
+
+
+def apply_kernel_diagonal(
+    K_train_raw: np.ndarray,
+    K_test: np.ndarray,
+    mode: str,
+    diag_train: np.ndarray | None = None,
+    diag_test: np.ndarray | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return the (train, test) kernels used by the SVC for a diagonal mode.
+
+    ``ideal`` returns the inputs unchanged (training diagonal = 1). ``measured``
+    puts the measured self-fidelities on the training diagonal. ``measured_normalized``
+    divides train and test entries by sqrt(K(x,x) K(y,y)) with measured values
+    for both sides, so the training diagonal becomes 1 and the test rows get the
+    same scaling.
+    """
+    K_train = np.array(K_train_raw, dtype=float, copy=True)
+    K_eval = np.array(K_test, dtype=float, copy=True)
+    if mode == "ideal":
+        return K_train, K_eval
+    if diag_train is None or len(diag_train) != K_train.shape[0]:
+        raise ValueError("Measured training self-fidelities are required for this diagonal mode.")
+    d_train = np.asarray(diag_train, dtype=float)
+    if mode == "measured":
+        np.fill_diagonal(K_train, d_train)
+        return K_train, K_eval
+    if mode == "measured_normalized":
+        if diag_test is None or len(diag_test) != K_eval.shape[0]:
+            raise ValueError("Measured test self-fidelities are required for measured_normalized.")
+        s_train = np.sqrt(np.maximum(d_train, MIN_SELF_FIDELITY))
+        s_test = np.sqrt(np.maximum(np.asarray(diag_test, dtype=float), MIN_SELF_FIDELITY))
+        np.fill_diagonal(K_train, d_train)
+        K_train = K_train / np.outer(s_train, s_train)
+        K_eval = K_eval / np.outer(s_test, s_train)
+        return K_train, K_eval
+    raise ValueError(f"Unknown kernel diagonal mode: {mode}")
+
+
+def measure_self_fidelities(X, feature_map, sampler, pass_manager, shots, max_circuits_per_job, label):
+    """Run the compute-uncompute circuit of each point with itself (ideal value 1)."""
+    pairs = [(x, x) for x in X]
+    return _run_fidelity_pairs_on_hardware(
+        pairs, feature_map, sampler, pass_manager, shots, max_circuits_per_job, label
+    )
 
 
 def make_run_dir(args, feature_set_name: str, n_qubits: int) -> Path:
@@ -691,7 +783,7 @@ def main():
     (run_dir / "feature_map.txt").write_text(str(feature_map.draw(output="text", fold=-1)) + "\n", encoding="utf-8")
     split_table(train_df, test_df, args.label, args.group_column).to_csv(run_dir / "split.csv", index=False)
 
-    workload = estimate_kernel_entries(len(train_df), len(test_df))
+    workload = estimate_kernel_entries(len(train_df), len(test_df), args.kernel_diagonal)
     print("\nDATA / FEATURE MAP")
     print(f"Feature set: {feature_set_name} ({len(features)} features)")
     print(f"Samples: {len(selected_df)} | train={len(train_df)} | test={len(test_df)}")
@@ -751,6 +843,7 @@ def main():
             "transpiler_seed": args.transpiler_seed,
             "max_circuits_per_job": args.max_circuits_per_job,
             "workload": workload,
+            "kernel_diagonal": args.kernel_diagonal,
             "classical_baseline": classical,
             "timing": {
                 "preprocess_train_wall_s": preprocess_train_wall,
@@ -792,6 +885,25 @@ def main():
     )
     test_wall = time.perf_counter() - test_start
 
+    diag_train = diag_test = None
+    diagonal_jobs = []
+    if args.kernel_diagonal != "ideal":
+        diag_train, _, _, diag_jobs_train = measure_self_fidelities(
+            X_train_scaled, feature_map, sampler, pass_manager, args.shots,
+            args.max_circuits_per_job, "K_diag_train",
+        )
+        diagonal_jobs += diag_jobs_train
+        if args.kernel_diagonal == "measured_normalized":
+            diag_test, _, _, diag_jobs_test = measure_self_fidelities(
+                X_test_scaled, feature_map, sampler, pass_manager, args.shots,
+                args.max_circuits_per_job, "K_diag_test",
+            )
+            diagonal_jobs += diag_jobs_test
+        K_train_used, K_test = apply_kernel_diagonal(
+            K_train_raw, K_test, args.kernel_diagonal, diag_train, diag_test
+        )
+        K_train_psd = _project_to_psd(K_train_used)
+
     qsvc = SVC(kernel="precomputed", C=args.C, class_weight=class_weight_value(args.class_weight))
 
     svc_fit_start = time.perf_counter()
@@ -812,7 +924,7 @@ def main():
     diagnosis = diagnose_fit(train_metrics["balanced_accuracy"], test_metrics["balanced_accuracy"])
     report = classification_report(test_df[args.label], pred_test, zero_division=0)
 
-    runtime_jobs = train_jobs + test_jobs
+    runtime_jobs = train_jobs + test_jobs + diagonal_jobs
     quantum_seconds = _sum_available(runtime_jobs, "quantum_seconds")
     queue_wall = _sum_available(runtime_jobs, "queue_wall_s")
     service_run_wall = _sum_available(runtime_jobs, "service_run_wall_s")
@@ -837,6 +949,10 @@ def main():
 
     pd.DataFrame(K_train_raw).to_csv(run_dir / "K_train_raw.csv", index=False)
     pd.DataFrame(K_train_psd).to_csv(run_dir / "K_train_psd.csv", index=False)
+    if diag_train is not None:
+        pd.DataFrame({"self_fidelity": diag_train}).to_csv(run_dir / "K_diag_train.csv", index=False)
+    if diag_test is not None:
+        pd.DataFrame({"self_fidelity": diag_test}).to_csv(run_dir / "K_diag_test.csv", index=False)
     pd.DataFrame(K_test).to_csv(run_dir / "K_test.csv", index=False)
     prediction_data = {
         "row_id": test_df["_row_id"].to_numpy(),
@@ -888,6 +1004,16 @@ def main():
         "max_circuits_per_job": args.max_circuits_per_job,
         "runtime_job_tag": run_tag,
         "kernel_workload_estimate": workload,
+        "kernel_diagonal": args.kernel_diagonal,
+        "kernel_diagonal_note": (
+            "K_train_raw.csv keeps the hardware off-diagonal entries with diagonal 1; "
+            "K_test.csv is the kernel actually used for prediction. ideal: training diagonal "
+            "fixed to 1 while test entries are noisy hardware estimates (K(x,x) < 1 on "
+            "hardware). measured / measured_normalized: see K_diag_*.csv."
+        ),
+        "self_fidelity_train_mean": None if diag_train is None else float(np.mean(diag_train)),
+        "self_fidelity_test_mean": None if diag_test is None else float(np.mean(diag_test)),
+        "result_scope": "feasibility demonstration on one small grouped split; not a statistical accuracy estimate",
         "train_metrics": train_metrics,
         "test_metrics": test_metrics,
         "fit_diagnosis": diagnosis,
