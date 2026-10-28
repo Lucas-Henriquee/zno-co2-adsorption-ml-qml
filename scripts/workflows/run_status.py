@@ -378,14 +378,20 @@ def section_md(ctx: Context, state: str) -> None:
                 prod = md_steps(seed_dir / "md_production.traj", interval)
                 if row.get("md_status"):
                     progress = ok_badge(row["md_status"])
-                elif state == "running" and (eq or prod):
-                    progress = yellow("production" if prod else "equilibration")
+                elif is_active(seed_dir):
+                    progress = yellow("production" if (seed_dir / "md_production.traj").is_file() else "equilibration")
                 else:
                     progress = dim("—")
                 rows.append([f"{material} {site} · seed {seed}", f"{eq}/{eq_target}", f"{prod}/{prod_target}",
                              fmt(row.get("temperature_k_mean"), ".0f"), fmt(row.get("c_min_slab_distance_ang_mean"), ".2f"),
                              fmt(row.get("oco_angle_deg_mean"), ".1f"), progress])
     table(columns, rows)
+
+
+def is_active(folder: Path, minutes: float = 15.0) -> bool:
+    """True when a file in the folder was written recently (also outside the workflow)."""
+    recent = time.time() - minutes * 60.0
+    return any(p.stat().st_mtime > recent for p in folder.iterdir() if p.is_file())
 
 
 def md_steps(path: Path, interval: int) -> int:
@@ -746,7 +752,8 @@ def main(argv: list[str] | None = None) -> None:
         width=max(100, min(shutil.get_terminal_size((120, 40)).columns, 140)),
     )
 
-    running = print_header(ctx, args.stale_minutes)
+    # A method launched outside the workflow (e.g. an extra MD seed) is live as well.
+    running = print_header(ctx, args.stale_minutes) or bool(gpaw_processes())
     if running:
         print_live(ctx)
     print_overview(ctx)

@@ -122,8 +122,21 @@ def test_same_seed_reproduces_trajectory(results):
     assert run(["--site", "bridge", "--seed", "7", *FAST]) == 0
     again = read_rows(results / "md/ZnO/bridge/seed_7/md_production_frames.csv")
     assert again == first
+    # Seed 8 from the first invocation is kept; seed 7 was recomputed.
     summary = read_rows(results / "md/ZnO/bridge/md_site_summary.csv")
-    assert [row["seed"] for row in summary] == ["7"]
+    assert sorted(row["seed"] for row in summary) == ["7", "8"]
+
+
+def test_adding_a_seed_later_keeps_the_earlier_trajectories(results):
+    make_results(results)
+    assert run(["--site", "bridge", "--seeds", "1234", "2345", *FAST]) == 0
+    before = [r for r in read_rows(results / "md/ZnO/bridge/md_production_frames.csv")]
+    assert run(["--site", "bridge", "--seeds", "3456", *FAST]) == 0
+    frames = read_rows(results / "md/ZnO/bridge/md_production_frames.csv")
+    summary = read_rows(results / "md/ZnO/bridge/md_site_summary.csv")
+    assert sorted({r["seed"] for r in frames}) == ["1234", "2345", "3456"]
+    assert sorted(r["seed"] for r in summary) == ["1234", "2345", "3456"]
+    assert [r for r in frames if r["seed"] != "3456"] == before
 
 
 def test_descriptors_use_minimum_image():

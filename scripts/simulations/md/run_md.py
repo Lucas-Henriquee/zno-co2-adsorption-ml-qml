@@ -248,6 +248,13 @@ def frame_descriptors(atoms, top_layer: list[int]) -> dict[str, float]:
     }
 
 
+def read_rows(path: Path) -> list[dict]:
+    if not path.is_file():
+        return []
+    with path.open("r", newline="", encoding="utf-8") as handle:
+        return list(csv.DictReader(handle))
+
+
 def save_csv(path: Path, rows: list[dict], fieldnames: list[str] | None = None):
     if not rows or not is_master():
         return
@@ -414,6 +421,13 @@ def run_site(material: str, site: str, settings: dict, results_dir: Path) -> lis
     )
 
     site_dir.mkdir(parents=True, exist_ok=True)
+    # Seeds from earlier invocations are kept, so a seed can be added later without
+    # dropping the trajectories that already exist; the seeds run now are recomputed.
+    current = {str(seed) for seed in settings["seeds"]}
+    kept_summary = [r for r in read_rows(site_dir / "md_site_summary.csv") if r.get("seed") not in current]
+    kept_frames = [r for r in read_rows(site_dir / "md_production_frames.csv") if r.get("seed") not in current]
+    if kept_summary:
+        print0(f"[md] {material} | {site}: keeping earlier seeds {sorted({r['seed'] for r in kept_summary})}")
     summary_rows = []
     all_production_rows = []
     for seed in settings["seeds"]:
@@ -440,8 +454,8 @@ def run_site(material: str, site: str, settings: dict, results_dir: Path) -> lis
             }
         )
         # Rewritten after each seed so finished trajectories are kept if a later one fails.
-        save_csv(site_dir / "md_production_frames.csv", all_production_rows, FRAME_FIELDS)
-        save_csv(site_dir / "md_site_summary.csv", summary_rows)
+        save_csv(site_dir / "md_production_frames.csv", kept_frames + all_production_rows, FRAME_FIELDS)
+        save_csv(site_dir / "md_site_summary.csv", kept_summary + summary_rows, list(summary_rows[0]))
     return summary_rows
 
 
