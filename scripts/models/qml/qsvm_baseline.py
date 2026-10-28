@@ -34,6 +34,7 @@ try:
         grouped_cv_splitter,
         grouped_train_test_split,
         load_grouped_dataset,
+        permute_group_labels,
         split_table,
     )
 except ModuleNotFoundError:  # executed as a file from outside the project root
@@ -45,6 +46,7 @@ except ModuleNotFoundError:  # executed as a file from outside the project root
         grouped_cv_splitter,
         grouped_train_test_split,
         load_grouped_dataset,
+        permute_group_labels,
         split_table,
     )
 
@@ -91,7 +93,17 @@ def parse_args():
     parser.add_argument("--class-weight", default="balanced", choices=["balanced", "none"])
     parser.add_argument("--max-samples", type=int, default=0, help="0 uses every available row.")
     parser.add_argument("--split-file", type=Path, default=None, help="Optional CSV with row_id and split=train/test; must not share groups.")
-    parser.add_argument("--cv", type=int, default=0, help="Optional stratified group CV on the training set; 0 disables it.")
+    parser.add_argument("--cv", type=int, default=5, help="Stratified group CV on the training set (same default as the SVM script); 0 disables it.")
+    parser.add_argument(
+        "--shuffle-label",
+        action="store_true",
+        help=(
+            "Sanity check: permute labels among the TRAINING trajectories (whole groups, "
+            "class sizes kept) and keep the test labels intact. This is one draw, not a "
+            "significance test; use scripts.models.evaluate_grouped for the "
+            "trajectory-level permutation test."
+        ),
+    )
     parser.add_argument(
         "--simulator",
         default="reference",
@@ -643,6 +655,8 @@ def main():
     feature_set_name = "custom" if args.features is not None else args.feature_set
     df = load_base_data(args, features)
     train_df, test_df = split_data(args, df)
+    if args.shuffle_label:
+        train_df = permute_group_labels(train_df, args.label, args.group_column, args.random_state)
     selected_df = pd.concat([train_df, test_df], ignore_index=True)
 
     feature_map, encoding_name = build_feature_map(len(features), args.n_qubits, args.reps, args.entanglement)
@@ -718,6 +732,7 @@ def main():
         "split_sha256": file_sha256(args.split_file),
         "split_strategy": "grouped",
         "grouping": group_summary(train_df, test_df, args.label, args.group_column),
+        "shuffle_label": bool(args.shuffle_label),
         "train_metrics": train_metrics,
         "test_metrics": test_metrics,
         "cv_folds": cv_folds,

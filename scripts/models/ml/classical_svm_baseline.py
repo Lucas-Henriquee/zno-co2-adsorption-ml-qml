@@ -34,6 +34,7 @@ try:
         grouped_cv_splitter,
         grouped_train_test_split,
         load_grouped_dataset,
+        permute_group_labels,
         split_table,
     )
 except ModuleNotFoundError:  # executed as a file from outside the project root
@@ -45,6 +46,7 @@ except ModuleNotFoundError:  # executed as a file from outside the project root
         grouped_cv_splitter,
         grouped_train_test_split,
         load_grouped_dataset,
+        permute_group_labels,
         split_table,
     )
 
@@ -87,7 +89,9 @@ def parse_args():
     parser.add_argument("--gamma", default="scale", help="'scale', 'auto', or a positive float.")
     parser.add_argument("--degree", type=int, default=3)
     parser.add_argument("--class-weight", default="balanced", choices=["balanced", "none"])
-    parser.add_argument("--scaler", default="power", choices=SCALERS)
+    # Same default preprocessing as the QSVM scripts (power transform, then MinMax
+    # to [0, pi]), so SVM and QSVM differ only in the kernel.
+    parser.add_argument("--scaler", default="power_minmax", choices=SCALERS)
     parser.add_argument("--test-size", type=float, default=0.25)
     parser.add_argument("--cv", type=int, default=5, help="Grouped CV folds on the training set; 0 disables it.")
     parser.add_argument("--max-samples", type=int, default=0, help="0 uses every available row.")
@@ -95,7 +99,16 @@ def parse_args():
     parser.add_argument("--output-dir", type=Path, default=RESULTS_DIR / "svm")
     parser.add_argument("--run-name", default=None)
     parser.add_argument("--random-state", type=int, default=42)
-    parser.add_argument("--shuffle-label", action="store_true")
+    parser.add_argument(
+        "--shuffle-label",
+        action="store_true",
+        help=(
+            "Sanity check: permute labels among the TRAINING trajectories (whole groups, "
+            "class sizes kept) and keep the test labels intact. This is one draw, not a "
+            "significance test; use scripts.models.evaluate_grouped for the "
+            "trajectory-level permutation test."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -258,11 +271,9 @@ def main():
     train_df, test_df = split_data(args, df)
 
     if args.shuffle_label:
-        combined = pd.concat([train_df, test_df], ignore_index=True)
-        shuffled = combined[args.label].sample(frac=1.0, random_state=args.random_state).to_numpy()
-        combined[args.label] = shuffled
-        train_df = combined.iloc[:len(train_df)].copy()
-        test_df = combined.iloc[len(train_df):].copy()
+        # Sanity check only: permute labels among the training trajectories and
+        # keep the test labels intact; the score should then drop to chance.
+        train_df = permute_group_labels(train_df, args.label, args.group_column, args.random_state)
 
     X_train, y_train = train_df[features], train_df[args.label]
     X_test, y_test = test_df[features], test_df[args.label]

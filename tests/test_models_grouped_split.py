@@ -112,7 +112,8 @@ class GroupedSplitTests(unittest.TestCase):
             csv_path = write_dataset(Path(tmp), 3)
             df = gs.load_grouped_dataset(csv_path, FEATURES, "label_site_id", "group")
             split = pd.DataFrame({"row_id": df["_row_id"],
-                                  "split": np.where(df["_row_id"] % 2 == 0, "train", "test")})
+                                  "split": np.where(df["_row_id"] % 2 == 0, "train", "test"),
+                                  "group": df["group"]})
             split_path = Path(tmp) / "split.csv"
             split.to_csv(split_path, index=False)
             with self.assertRaisesRegex(ValueError, "both train and test"):

@@ -18,6 +18,9 @@ import pandas as pd
 from sklearn.model_selection import StratifiedGroupKFold
 
 DEFAULT_GROUP_COLUMN = "group"
+# Name of the group column in split files written by split_table, whatever the
+# dataset's group column is called.
+SPLIT_GROUP_COLUMN = "group"
 # Minimum independent trajectories per class for a holdout split: one for
 # training and one for testing.
 MIN_GROUPS_PER_CLASS_HOLDOUT = 2
@@ -172,8 +175,12 @@ def read_split_file(
     group: str,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     split = pd.read_csv(split_path)
-    if not {"row_id", "split"}.issubset(split.columns):
-        raise ValueError("split-file must contain columns: row_id, split")
+    if not {"row_id", "split", SPLIT_GROUP_COLUMN}.issubset(split.columns):
+        raise ValueError(
+            f"split-file must contain columns: row_id, split, {SPLIT_GROUP_COLUMN}. The "
+            f"'{SPLIT_GROUP_COLUMN}' column (written by split_table) is checked against the "
+            "dataset so a split made for another dataset or grouping is not silently reused."
+        )
     if split["row_id"].duplicated().any():
         raise ValueError("split-file contains duplicated row_id values")
     invalid_splits = sorted(set(split["split"]) - {"train", "test"})
@@ -196,9 +203,46 @@ def read_split_file(
                 "split-file true_label does not match the dataset for row_ids: "
                 f"{mismatched[:10].tolist()}"
             )
+    expected_groups = split.set_index("row_id")[SPLIT_GROUP_COLUMN].astype(str)
+    actual_groups = indexed.loc[expected_groups.index, group].astype(str)
+    mismatched = expected_groups.index[expected_groups.to_numpy() != actual_groups.to_numpy()]
+    if len(mismatched):
+        examples = [
+            f"row_id {int(row_id)}: split-file={expected_groups.loc[row_id]!r}, "
+            f"dataset={actual_groups.loc[row_id]!r}"
+            for row_id in mismatched[:5]
+        ]
+        raise ValueError(
+            f"split-file '{SPLIT_GROUP_COLUMN}' column does not match the dataset column "
+            f"'{group}' for {len(mismatched)} row(s), e.g. {'; '.join(examples)}. The split "
+            "was made for a different dataset or grouping; regenerate it."
+        )
     train_df, test_df = indexed.loc[train_ids].copy(), indexed.loc[test_ids].copy()
     assert_no_group_leak(train_df, test_df, group)
     return train_df, test_df
+
+
+def permute_group_labels(
+    df: pd.DataFrame,
+    label: str,
+    group: str,
+    random_state: int | np.random.Generator,
+) -> pd.DataFrame:
+    """Return a copy of ``df`` whose labels are permuted among groups.
+
+    Each group (trajectory) keeps a single label and the number of groups per
+    class is unchanged; only which trajectory carries which label changes. This
+    is the null hypothesis appropriate for grouped data: permuting rows instead
+    would split a trajectory over several labels and make the null too easy.
+    """
+    rng = random_state if isinstance(random_state, np.random.Generator) else np.random.default_rng(random_state)
+    check_groups_have_single_label(df, label, group)
+    group_labels = df.groupby(group, sort=True)[label].first()
+    permuted = rng.permutation(group_labels.to_numpy())
+    mapping = dict(zip(group_labels.index, permuted))
+    out = df.copy()
+    out[label] = out[group].map(mapping).astype(df[label].dtype)
+    return out
 
 
 def grouped_train_test_split(
