@@ -78,9 +78,78 @@ class BarrierMetricsTests(unittest.TestCase):
         self.assertIsNone(run_neb.barrier_metrics([0.0, 1.0]))
         self.assertIsNone(run_neb.barrier_metrics([0.0, math.nan, 0.1]))
 
+    def test_lab_top_metal_to_bridge_endpoints_are_not_minima(self):
+        # Lab band (eV vs IS, endpoints included): every internal image is below both endpoints.
+        metrics = run_neb.barrier_metrics([0.0, -0.0335, -0.0953, -0.1027, -0.0664], resolution_ev=0.03)
+        self.assertAlmostEqual(metrics["initial_dip_eV"], 0.1027)
+        self.assertAlmostEqual(metrics["final_dip_eV"], 0.0363)
+        self.assertTrue(metrics["initial_not_minimum"])
+        self.assertTrue(metrics["final_not_minimum"])
+        self.assertTrue(metrics["endpoint_not_minimum"])
+        self.assertEqual(metrics["lowest_image_index"], 3)
+        self.assertAlmostEqual(metrics["barrier_from_lowest_eV"], 0.1027)
+        self.assertTrue(metrics["no_internal_saddle"])
+        self.assertEqual(metrics["highest_image_index"], 0)
+        self.assertAlmostEqual(metrics["forward_barrier_eV"], 0.0)
+        self.assertAlmostEqual(metrics["reverse_barrier_eV"], 0.0664)
+        self.assertFalse(metrics["barrier_resolved"])
+        self.assertFalse(metrics["reverse_barrier_resolved"])
+        self.assertEqual(
+            run_neb.endpoint_flag_text(metrics),
+            "endpoint not a minimum along the band: initial dip 0.103 eV, final dip 0.036 eV",
+        )
+
+    def test_lab_bridge_to_top_oxygen_saddle_below_resolution(self):
+        metrics = run_neb.barrier_metrics([0.0, 0.0003, 0.0130, 0.0287, 0.0136], resolution_ev=0.03)
+        self.assertAlmostEqual(metrics["initial_dip_eV"], -0.0003)
+        self.assertAlmostEqual(metrics["final_dip_eV"], 0.0133)
+        self.assertFalse(metrics["initial_not_minimum"])
+        self.assertFalse(metrics["final_not_minimum"])
+        self.assertFalse(metrics["endpoint_not_minimum"])
+        self.assertEqual(metrics["lowest_image_index"], 0)
+        self.assertAlmostEqual(metrics["barrier_from_lowest_eV"], 0.0287)
+        self.assertFalse(metrics["no_internal_saddle"])
+        self.assertEqual(metrics["highest_image_index"], 3)
+        self.assertAlmostEqual(metrics["forward_barrier_eV"], 0.0287)
+        self.assertAlmostEqual(metrics["reverse_barrier_eV"], 0.0151)
+        self.assertFalse(metrics["barrier_resolved"])  # 0.0287 < 0.03
+        self.assertFalse(metrics["reverse_barrier_resolved"])
+        self.assertEqual(run_neb.endpoint_flag_text(metrics), "")
+
+    def test_endpoint_not_minimum_blocks_a_resolved_saddle(self):
+        # Clear internal saddle, but the band dips 0.1 eV below the initial endpoint first.
+        metrics = run_neb.barrier_metrics([0.0, -0.1, 0.4, 0.1, 0.05])
+        self.assertFalse(metrics["no_internal_saddle"])
+        self.assertTrue(metrics["initial_not_minimum"])
+        self.assertTrue(metrics["final_not_minimum"])
+        self.assertAlmostEqual(metrics["forward_barrier_eV"], 0.4)
+        self.assertAlmostEqual(metrics["barrier_from_lowest_eV"], 0.5)
+        self.assertEqual(metrics["lowest_image_index"], 1)
+        self.assertFalse(metrics["barrier_resolved"])
+        self.assertFalse(metrics["reverse_barrier_resolved"])
+
+    def test_reverse_barrier_resolved(self):
+        metrics = run_neb.barrier_metrics([-10.0, -9.8, -9.5, -9.7, -9.9, -9.95, -10.2])
+        self.assertFalse(metrics["endpoint_not_minimum"])
+        self.assertTrue(metrics["reverse_barrier_resolved"])
+        # A small reverse barrier is below resolution even with a resolved forward one.
+        metrics = run_neb.barrier_metrics([0.0, 0.3, 0.29])
+        self.assertTrue(metrics["barrier_resolved"])
+        self.assertFalse(metrics["reverse_barrier_resolved"])
+
 
 class _FakeNEB:
-    climb = False
+    """Stands in for ase.mep.NEB: ``energies`` as left by the last get_forces call."""
+
+    def __init__(self, energies=(0.0, 0.2, 0.5, 0.2, 0.0)):
+        self.climb = False
+        self.energies = None if energies is None else list(energies)
+        self.get_forces_calls = 0
+        self._pending = energies
+
+    def get_forces(self):
+        self.get_forces_calls += 1
+        self.energies = list(self._pending)
 
 
 class _FakeOptimizer:
@@ -103,12 +172,15 @@ class _FakeOptimizer:
 
 @unittest.skipIf(ase is None, "ASE is required")
 class PhaseTests(unittest.TestCase):
-    def run_phases(self, converge_after, climb=True):
-        neb = _FakeNEB()
+    def run_phases(self, converge_after, climb=True, energies=(0.0, 0.2, 0.5, 0.2, 0.0)):
+        neb = _FakeNEB(energies)
         opt = _FakeOptimizer(converge_after)
+        phases = []
         record = run_neb.run_neb_phases(
             neb, opt, fmax=0.08, fmax_ci=0.05, steps=300, climb=climb, climb_start_fraction=0.30,
+            on_phase=phases.append,
         )
+        record["_phases"] = phases
         return neb, opt, record
 
     def test_ci_phase_runs_even_if_plain_phase_converged(self):
@@ -116,6 +188,11 @@ class PhaseTests(unittest.TestCase):
         self.assertTrue(neb.climb)
         self.assertEqual(opt.calls, [(0.08, 90), (0.05, 280)])
         self.assertTrue(record["climb_activated"])
+        self.assertFalse(record["climb_skipped"])
+        self.assertEqual(record["phase2"], "climbing_image")
+        self.assertEqual(record["n_steps_phase2"], 15)
+        self.assertEqual([p["phase"] for p in record["_phases"]], ["plain", "climbing_image"])
+        self.assertEqual(record["_phases"][1]["phase_start_step"], 20)
         self.assertTrue(record["converged_plain"])
         self.assertTrue(record["converged_ci"])
         self.assertEqual(record["n_steps_plain"], 20)
@@ -135,11 +212,56 @@ class PhaseTests(unittest.TestCase):
         self.assertFalse(record["converged_ci"])
         self.assertFalse(record["converged"])
 
+    def test_climb_skipped_without_internal_maximum(self):
+        # Lab top_metal -> bridge band: ASE would climb image 1, which is below the IS.
+        energies = (0.0, -0.0335, -0.0953, -0.1027, -0.0664)
+        neb, opt, record = self.run_phases([20, 25], energies=energies)
+        self.assertFalse(neb.climb)
+        self.assertEqual(opt.calls, [(0.08, 90), (0.05, 280)])
+        self.assertFalse(record["climb_activated"])
+        self.assertTrue(record["climb_skipped"])
+        self.assertIn("no internal maximum", record["climb_skip_reason"])
+        self.assertEqual(record["climb_decision_energies_ev"], list(energies))
+        self.assertEqual(record["phase2"], "plain_continued")
+        self.assertEqual(record["n_steps_plain"], 20)
+        self.assertEqual(record["n_steps_phase2"], 25)
+        self.assertEqual(record["n_steps_ci"], 0)
+        self.assertIsNone(record["converged_ci"])
+        self.assertTrue(record["converged_phase2"])
+        self.assertTrue(record["converged"])
+        self.assertEqual(record["n_steps_total"], 45)
+        self.assertEqual([p["phase"] for p in record["_phases"]], ["plain", "plain_continued"])
+        self.assertTrue(record["_phases"][1]["climb_skipped"])
+
+    def test_climb_skipped_when_maximum_equals_an_endpoint(self):
+        neb, _, record = self.run_phases([None, None], energies=(0.0, 0.0, -0.2))
+        self.assertFalse(neb.climb)
+        self.assertTrue(record["climb_skipped"])
+        self.assertFalse(record["converged"])
+        self.assertEqual(record["n_steps_plain"] + record["n_steps_phase2"], 300)
+
+    def test_energies_are_evaluated_when_missing(self):
+        neb = _FakeNEB(None)
+        neb._pending = (0.0, 0.3, 0.1)
+        record = run_neb.run_neb_phases(
+            neb, _FakeOptimizer([5, 5]), fmax=0.08, fmax_ci=0.05, steps=300, climb=True,
+            climb_start_fraction=0.30,
+        )
+        self.assertEqual(neb.get_forces_calls, 1)
+        self.assertTrue(record["climb_activated"])
+
+    def test_climb_decision(self):
+        self.assertTrue(run_neb.climb_decision([0.0, 0.01, 0.0])[0])
+        self.assertFalse(run_neb.climb_decision([0.0, 0.3, 0.3])[0])
+        self.assertFalse(run_neb.climb_decision([0.0, math.nan, 0.1])[0])
+
     def test_without_climb_single_phase_uses_full_budget(self):
         neb, opt, record = self.run_phases([None], climb=False)
         self.assertFalse(neb.climb)
         self.assertEqual(opt.calls, [(0.08, 300)])
         self.assertFalse(record["climb_activated"])
+        self.assertFalse(record["climb_skipped"])
+        self.assertIsNone(record["phase2"])
         self.assertIsNone(record["converged_ci"])
 
 

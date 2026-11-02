@@ -246,3 +246,134 @@ def test_analysis_table_reads_corrected_rows(run_dir):
     with pytest.raises(SystemExit):
         corr.load_corrected_pathway_rows(run_dir / corr.CORRECTED_CSV, "z")
     assert corr.load_corrected_pathway_rows(run_dir / "missing.csv") is None
+
+
+# --------------------------------------------------------------------------- validity
+
+WRONG_FLAGS = ("cooh_c_bonded_to_lattice_o", "cooh_dissociated", "cooh_deprotonated", "co_dissociated")
+
+
+def _write_summary(run_dir, flags_by_site):
+    rows = [_summary_row(site, flags_by_site.get(site, [])) for site in SITES]
+    fieldnames = []
+    for row in rows:
+        fieldnames += [key for key in row if key not in fieldnames]
+    with (run_dir / "co2rr_pathway_summary.csv").open("w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+    return rows
+
+
+@pytest.mark.parametrize("flag", WRONG_FLAGS)
+def test_pathway_validity_wrong_intermediate_per_flag(flag):
+    assert co2rr.pathway_validity(flag) == "wrong_intermediate"
+    assert co2rr.pathway_validity([flag]) == "wrong_intermediate"
+    # Takes precedence over a desorbed flag.
+    assert co2rr.pathway_validity(f"co_desorbed;{flag}") == "wrong_intermediate"
+    assert not corr.is_unbound(flag)
+
+
+def test_pathway_validity_unbound_and_ok():
+    assert co2rr.pathway_validity("cooh_desorbed") == "unbound"
+    assert co2rr.pathway_validity(["co_desorbed"]) == "unbound"
+    assert co2rr.pathway_validity("") == "ok"
+    assert co2rr.pathway_validity("o_star_peroxo") == "ok"  # O* is not in the profile
+
+
+@pytest.mark.parametrize("flag", WRONG_FLAGS)
+def test_summary_row_keeps_status_ok_but_withholds_u_l(flag):
+    """pathway_status drives resume/retry and stays ok; validity is a separate column."""
+    row = _summary_row("top_metal", [flag])
+    assert row["pathway_status"] == "ok"
+    assert row["pathway_validity"] == "wrong_intermediate"
+    assert math.isnan(row["limiting_potential_v"]) and row["limiting_step"] == ""
+    assert math.isfinite(row["limiting_potential_if_bound_v"])
+    good = _summary_row("top_metal", [])
+    assert good["pathway_validity"] == "ok"
+    assert good["limiting_potential_v"] == good["limiting_potential_if_bound_v"]
+
+
+@pytest.mark.parametrize("flag", WRONG_FLAGS)
+def test_wrong_intermediate_sites_are_not_ranked(run_dir, flag):
+    _write_summary(run_dir, {"top_oxygen": [flag], "bridge": ["cooh_desorbed"]})
+    rows, _ = _run(run_dir)
+    for variant in corr.VARIANTS:
+        wrong = rows[("top_oxygen", variant)]
+        assert wrong["status"] == wrong["pathway_validity"] == "wrong_intermediate"
+        assert math.isnan(wrong["limiting_potential_v"])
+        assert math.isfinite(wrong["limiting_potential_if_bound_v"])
+        assert wrong["rank_by_limiting_potential"] == "" and wrong["limiting_step"] == ""
+        assert rows[("bridge", variant)]["status"] == "unbound"
+        assert rows[("top_metal", variant)]["rank_by_limiting_potential"] == 1
+    assert "wrong_intermediate" in (run_dir / corr.NOTE_MD).read_text()
+
+    from scripts.analysis import analysis_co2_reduction as analysis
+
+    merged = [{"material": "ZnO", "site": site, "quality_flag": "ok"} for site in SITES]
+    corrected = corr.load_corrected_pathway_rows(run_dir / corr.CORRECTED_CSV, "c")
+    table = {row["site"]: row for row in analysis.build_pathway_table(merged, corrected)}
+    assert table["top_oxygen"]["pathway_status"] == "wrong_intermediate"
+    assert math.isnan(table["top_oxygen"]["limiting_potential_v"])
+    assert "wrong intermediate" in table["top_oxygen"]["notes"]
+
+    # --uncorrected: the run summary (pathway_status ok) must be honoured as well.
+    with (run_dir / "co2rr_pathway_summary.csv").open() as handle:
+        summary = list(csv.DictReader(handle))
+    table = {row["site"]: row for row in analysis.build_pathway_table(merged, summary)}
+    assert table["top_oxygen"]["pathway_status"] == "ok"
+    assert table["top_oxygen"]["pathway_validity"] == "wrong_intermediate"
+    assert math.isnan(table["top_oxygen"]["limiting_potential_v"])
+    assert math.isfinite(table["top_oxygen"]["limiting_potential_if_bound_v"])
+    assert table["bridge"]["pathway_validity"] == "unbound"
+    assert table["top_metal"]["pathway_validity"] == "ok"
+    ranked = analysis.attach_limiting_potentials(
+        [dict(row) for row in merged], list(table.values())
+    )
+    assert [(row["site"], row["rank_by_limiting_potential"]) for row in ranked] == [
+        ("top_metal", 1), ("top_oxygen", ""), ("bridge", ""),
+    ]
+
+    # Old summaries without pathway_validity: validity derived from the flags.
+    for row in summary:
+        row.pop("pathway_validity")
+    table = {row["site"]: row for row in analysis.build_pathway_table(merged, summary)}
+    assert table["top_oxygen"]["pathway_validity"] == "wrong_intermediate"
+    assert math.isnan(table["top_oxygen"]["limiting_potential_v"])
+
+
+def test_plot_marks_wrong_intermediate(run_dir):
+    from scripts.visualization import plot_co2rr_pathway as plot
+
+    _write_summary(run_dir, {"top_oxygen": ["cooh_deprotonated"], "bridge": ["cooh_desorbed"]})
+    _run(run_dir)
+    rows = corr.load_corrected_pathway_rows(run_dir / corr.CORRECTED_CSV, "c")
+    profiles, _ = plot.site_profiles(rows, "ZnO")
+    by_site = {item["site"]: item for item in profiles}
+    assert by_site["top_oxygen"]["validity"] == "wrong_intermediate"
+    assert not by_site["top_oxygen"]["unbound"]
+    assert math.isnan(by_site["top_oxygen"]["limiting_potential_v"])
+    assert by_site["bridge"]["validity"] == "unbound"
+    assert math.isfinite(by_site["top_metal"]["limiting_potential_v"])
+    hidden, _ = plot.site_profiles(rows, "ZnO", include_unbound=False)
+    assert [item["site"] for item in hidden] == ["top_metal"]
+    # --uncorrected summary: recognised from pathway_validity / geometry_flags.
+    with (run_dir / "co2rr_pathway_summary.csv").open() as handle:
+        summary = list(csv.DictReader(handle))
+    profiles, _ = plot.site_profiles(summary, "ZnO")
+    assert [item["validity"] for item in profiles] == ["ok", "wrong_intermediate", "unbound"]
+    out = run_dir / "plots_wrong"
+    with contextlib.redirect_stdout(io.StringIO()):
+        plot.main(["--summary", str(run_dir / "co2rr_pathway_summary.csv"), "--output-dir", str(out)])
+    with (out / "co2rr_pathway_profile_table.csv").open() as handle:
+        table = list(csv.DictReader(handle))
+    assert {row["validity"] for row in table if row["site"] == "top_oxygen"} == {"wrong_intermediate"}
+
+
+def test_note_states_floor_choice_and_gas_only_correction(run_dir):
+    _run(run_dir)
+    note = (run_dir / corr.NOTE_MD).read_text()
+    assert "usual quasi-harmonic" not in note
+    assert "100 cm^-1" in note and "--low-mode-cm 100" in note
+    assert "CO2(g) and CO(g) only" in note
+    assert "-0.19 eV" in note and "-0.24 eV" in note

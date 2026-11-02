@@ -1,3 +1,11 @@
+"""Publication figures from the tables of analysis_co2_reduction.py.
+
+fig01 adsorption-energy heatmap (rows with quality_flag/dft_status ok only), fig02 CO2
+activation (C-O stretch against the run's gas-phase CO2 baseline, O-C-O bend), fig03
+E_ads vs first bright TDDFT excitation of the isolated CO2, fig04 sites ranked by the
+CHE limiting potential, fig05 broadened TDDFT spectra of the isolated CO2 (adsorbed
+geometry) for every ok site. No composite score is used.
+"""
 from __future__ import annotations
 
 import argparse
@@ -143,7 +151,15 @@ def _within_axis(target: float, lo: float, hi: float, margin: float = 0.10) -> b
     return (lo - margin * span) <= target <= (hi + margin * span)
 
 
+def row_is_ok(row: dict[str, str]) -> bool:
+    """quality_flag and dft_status are ok (a column that is absent does not count against the row)."""
+    return all(str(row.get(column, "ok") or "").strip() == "ok" for column in ("quality_flag", "dft_status"))
+
+
 def figure_adsorption_heatmap(rows: list[dict[str, str]], plt, Normalize, ticker) -> None:
+    rows = [row for row in rows if row_is_ok(row)]
+    if not rows:
+        raise SystemExit("No rows with quality_flag/dft_status ok for the heatmap.")
     materials = ordered_unique([row["material"] for row in rows], MATERIAL_ORDER)
     sites = ordered_unique([row["site"] for row in rows], SITE_ORDER)
 
@@ -152,6 +168,7 @@ def figure_adsorption_heatmap(rows: list[dict[str, str]], plt, Normalize, ticker
         m_idx = materials.index(row["material"])
         s_idx = sites.index(row["site"])
         matrix[m_idx, s_idx] = safe_float(row.get("adsorption_energy_ev"))
+    any_positive = bool(np.any(matrix[np.isfinite(matrix)] > 0.0))
 
     finite = matrix[np.isfinite(matrix)]
     if len(finite) == 0:
@@ -175,13 +192,19 @@ def figure_adsorption_heatmap(rows: list[dict[str, str]], plt, Normalize, ticker
     for i in range(len(materials)):
         for j in range(len(sites)):
             value = matrix[i, j]
-            label = "--" if not math.isfinite(value) else f"{value:.2f}"
+            label = "--" if not math.isfinite(value) else f"{value:.2f}" + ("*" if value > 0.0 else "")
             color = "white" if math.isfinite(value) and norm(value) > 0.55 else "black"
             ax.text(j, i, label, ha="center", va="center", color=color, fontsize=9)
 
     cbar = fig.colorbar(im, ax=ax, pad=0.02)
     cbar.ax.yaxis.set_major_formatter(ticker.FormatStrFormatter("%.2f"))
     cbar.set_label("Adsorption energy, E_ads (eV)")
+    if any_positive:
+        ax.text(
+            0.0, -0.18,
+            "* E_ads > 0: not bound at PBE level (|E_ads| < 0.05 eV is within the numerical uncertainty)",
+            transform=ax.transAxes, ha="left", va="top", fontsize=8,
+        )
     _clean_axes(ax)
 
     save_figure(fig, "fig01_adsorption_heatmap", plt)
@@ -198,20 +221,29 @@ def figure_activation_scatter(rows: list[dict[str, str]], plt, Normalize, ticker
     stretch = np.full((len(sites), len(materials)), np.nan, dtype=float)
     bend = np.full((len(sites), len(materials)), np.nan, dtype=float)
 
+    # The stretch is taken from the table: it is relative to the relaxed gas-phase CO2 of
+    # the same run (co_bond_baseline_ang), not to an experimental bond length.
+    baselines: set[float] = set()
     for row in filtered:
         s_idx = sites.index(row["site"])
         m_idx = materials.index(row["material"])
-        co_avg = safe_float(row.get("co_bond_avg_ang"))
+        co_stretch = safe_float(row.get("co_bond_stretch_ang"))
+        baseline = safe_float(row.get("co_bond_baseline_ang"))
         angle = safe_float(row.get("oco_angle_deg"))
-        if math.isfinite(co_avg):
-            stretch[s_idx, m_idx] = co_avg - 1.16
+        if math.isfinite(co_stretch):
+            stretch[s_idx, m_idx] = co_stretch
+        if math.isfinite(baseline):
+            baselines.add(round(baseline, 4))
         if math.isfinite(angle):
             bend[s_idx, m_idx] = 180.0 - angle
 
     s_finite = stretch[np.isfinite(stretch)]
     b_finite = bend[np.isfinite(bend)]
-    if len(s_finite) == 0 or len(b_finite) == 0:
+    if len(b_finite) == 0:
         raise SystemExit("No finite activation values available.")
+    if len(s_finite) == 0:
+        print("[figures] fig02: no C-O stretch (no gas-phase CO2 baseline in the table); stretch panel left empty")
+        s_finite = np.asarray([0.0])
 
     fig, axes = plt.subplots(1, 2, figsize=(9.0, 4.8), constrained_layout=True, sharey=True)
 
@@ -230,7 +262,10 @@ def figure_activation_scatter(rows: list[dict[str, str]], plt, Normalize, ticker
         _clean_axes(ax)
 
     axes[0].set_ylabel("Adsorption site")
-    axes[0].set_title("CO bond stretch, Δd (Ang)")
+    if len(baselines) == 1:
+        axes[0].set_title(f"C-O stretch vs gas CO2 ({next(iter(baselines)):.3f} Ang), Δd (Ang)", fontsize=10)
+    else:
+        axes[0].set_title("C-O stretch vs gas CO2 of the same profile, Δd (Ang)", fontsize=10)
     axes[1].set_title("O-C-O bend, Δθ (deg)")
 
     for i in range(len(sites)):
@@ -254,15 +289,16 @@ def figure_activation_scatter(rows: list[dict[str, str]], plt, Normalize, ticker
 
 
 def co2_onset(row: dict[str, str]) -> float:
-    """TDDFT onset of the isolated CO2 molecule (co2_isolated_onset_ev).
+    """First bright TDDFT excitation of the isolated CO2 (co2_isolated_first_bright_excitation_ev).
 
-    The legacy name tddft_onset_ev is read only as a fallback. This is not an
-    absorption onset of the ZnO/CO2 system.
+    The older names co2_isolated_onset_ev and tddft_onset_ev are read as fallbacks. This
+    is not an absorption onset of the ZnO/CO2 system.
     """
-    value = row.get("co2_isolated_onset_ev")
-    if value in (None, ""):
-        value = row.get("tddft_onset_ev")
-    return safe_float(value)
+    for column in ("co2_isolated_first_bright_excitation_ev", "co2_isolated_onset_ev", "tddft_onset_ev"):
+        value = row.get(column)
+        if value not in (None, ""):
+            return safe_float(value)
+    return float("nan")
 
 
 def figure_photo_thermo_map(rows: list[dict[str, str]], plt, Line2D) -> None:
@@ -330,13 +366,13 @@ def figure_photo_thermo_map(rows: list[dict[str, str]], plt, Line2D) -> None:
     ax.set_xlim(x_min - x_pad, x_max + x_pad)
     ax.set_ylim(y_min - y_pad, y_max + y_pad)
     ax.set_xlabel("Adsorption energy, E_ads (eV)")
-    ax.set_ylabel("Isolated-CO2 TDDFT onset (eV)")
-    ax.set_title("Adsorption Energy vs Isolated-CO2 TDDFT Onset")
+    ax.set_ylabel("First bright excitation, isolated CO2 (eV)")
+    ax.set_title("Adsorption Energy vs First Bright TDDFT Excitation of Isolated CO2")
     ax.grid(linestyle="--", linewidth=0.5, alpha=0.32)
     ax.text(
         0.014,
         0.97,
-        "Onset of the isolated CO2 molecule, not of the ZnO/CO2 system",
+        "Isolated CO2 in its adsorbed geometry, not the ZnO/CO2 system",
         transform=ax.transAxes,
         ha="left",
         va="top",
@@ -392,44 +428,51 @@ def figure_photo_thermo_map(rows: list[dict[str, str]], plt, Line2D) -> None:
 
 
 def figure_site_ranking(rows: list[dict[str, str]], plt, patches) -> None:
+    """Sites ranked by the CHE limiting potential U_L (rank_by_limiting_potential).
+
+    Sites without a valid pathway (pathway_validity unbound/wrong_intermediate) or
+    without U_L have no rank and are not drawn.
+    """
     ranked = sorted(
         [
             row
             for row in rows
-            if row.get("quality_flag", "") == "ok"
-            and math.isfinite(safe_float(row.get("reduction_proxy_score")))
+            if row_is_ok(row)
+            and str(row.get("rank_by_limiting_potential", "")).strip()
+            and math.isfinite(safe_float(row.get("limiting_potential_v")))
         ],
-        key=lambda row: safe_float(row.get("reduction_proxy_score")),
-        reverse=True,
+        key=lambda row: safe_float(row.get("rank_by_limiting_potential")),
     )
     if not ranked:
-        raise SystemExit("No valid rows for ranking figure.")
+        print("[figures] skipped fig04_site_ranking (no site with a limiting potential; run the CO2RR pathway step)")
+        return
 
     labels = [f"{row['material']} | {_site_label(row['site'])}" for row in ranked]
-    scores = [safe_float(row.get("reduction_proxy_score")) for row in ranked]
+    values = [safe_float(row.get("limiting_potential_v")) for row in ranked]
     colors = [MATERIAL_COLORS.get(row["material"], "#333333") for row in ranked]
 
     fig, ax = plt.subplots(figsize=(8.0, 5.4), constrained_layout=True)
     y = np.arange(len(labels))
-    bars = ax.barh(y, scores, color=colors, edgecolor="black", linewidth=0.6)
+    bars = ax.barh(y, values, color=colors, edgecolor="black", linewidth=0.6)
 
     for idx, bar in enumerate(bars):
         width = bar.get_width()
         ax.text(
-            width + 0.0025,
+            width + (0.01 if width >= 0 else -0.01),
             bar.get_y() + bar.get_height() / 2,
-            f"{scores[idx]:.3f}",
-            ha="left",
+            f"{values[idx]:+.2f}",
+            ha="left" if width >= 0 else "right",
             va="center",
             fontsize=8.5,
         )
 
+    ax.axvline(0.0, color="0.4", linewidth=0.8)
     ax.set_yticks(y)
     ax.set_yticklabels(labels)
     ax.invert_yaxis()
     ax.set_ylabel("Oxide-site candidate")
-    ax.set_xlabel("Reduction proxy score (a.u.)")
-    ax.set_title("Ranked Oxide-Site Candidates")
+    ax.set_xlabel("Limiting potential, $U_L$ (V vs RHE)")
+    ax.set_title("Sites Ranked by CO2 -> CO Limiting Potential (CHE)")
     ax.grid(axis="x", linestyle="--", linewidth=0.5, alpha=0.35)
     _clean_axes(ax)
 
@@ -491,51 +534,37 @@ def _gaussian_broaden(
     return kernel @ oscillator_strengths
 
 
+SITE_LINESTYLES = {"top_metal": "-", "top_oxygen": "--", "bridge": ":"}
+
+
 def figure_tddft_gaussian_spectra(rows: list[dict[str, str]], plt) -> None:
-    valid_rows = [
-        row
-        for row in rows
-        if row.get("quality_flag", "") == "ok"
-        and math.isfinite(safe_float(row.get("reduction_proxy_score")))
-    ]
+    """Broadened LrTDDFT spectra of the isolated CO2 in its adsorbed geometry, every ok site.
+
+    Intensity = sum_i f_i g(E - E_i) with a normalised Gaussian g of width sigma, in eV^-1
+    (f is dimensionless); not normalised between sites.
+    """
+    valid_rows = [row for row in rows if row_is_ok(row)]
     if not valid_rows:
         print("[figures] skipped fig05_tddft_gaussian_spectra (no valid quality rows)")
         return
 
-    best_by_material: dict[str, dict[str, str]] = {}
-    for row in valid_rows:
-        material = row["material"]
-        score = safe_float(row.get("reduction_proxy_score"))
-        current = best_by_material.get(material)
-        if current is None or score > safe_float(current.get("reduction_proxy_score")):
-            best_by_material[material] = row
-
-    selected_materials = ordered_unique(list(best_by_material.keys()), MATERIAL_ORDER)
-    if not selected_materials:
-        print("[figures] skipped fig05_tddft_gaussian_spectra (no selected materials)")
-        return
+    material_order = {name: idx for idx, name in enumerate(MATERIAL_ORDER)}
+    site_order = {name: idx for idx, name in enumerate(SITE_ORDER)}
+    valid_rows.sort(key=lambda row: (material_order.get(row["material"], 99), site_order.get(row["site"], 99)))
 
     sigma_ev = 0.10
     spectra_payload: list[dict[str, object]] = []
     all_min: list[float] = []
     all_max: list[float] = []
 
-    for material in selected_materials:
-        row = best_by_material[material]
-        site = row["site"]
+    for row in valid_rows:
+        material, site = row["material"], row["site"]
         energies, osc = _load_transitions(material=material, site=site)
         if len(energies) == 0:
             continue
         all_min.append(float(np.min(energies)))
         all_max.append(float(np.max(energies)))
-        spectra_payload.append(
-            {
-                "material": material,
-                "site": site,
-                "energies": energies,
-                "osc": osc,
-            }
-        )
+        spectra_payload.append({"material": material, "site": site, "energies": energies, "osc": osc})
 
     if not spectra_payload:
         print("[figures] skipped fig05_tddft_gaussian_spectra (missing transitions.csv files)")
@@ -548,46 +577,39 @@ def figure_tddft_gaussian_spectra(rows: list[dict[str, str]], plt) -> None:
         return
 
     grid = np.linspace(e_min, e_max, 1400)
-    global_max = 0.0
+    fig, ax = plt.subplots(figsize=(8.4, 5.2), constrained_layout=True)
+    y_max = 0.0
     for payload in spectra_payload:
+        material = str(payload["material"])
+        site = str(payload["site"])
+        color = MATERIAL_COLORS.get(material, "#555555")
         intensity = _gaussian_broaden(
             energy_grid=grid,
             transition_energies=payload["energies"],
             oscillator_strengths=payload["osc"],
             sigma_ev=sigma_ev,
         )
-        payload["intensity"] = intensity
-        global_max = max(global_max, float(np.max(intensity)))
-
-    norm_scale = global_max if global_max > 0.0 else 1.0
-
-    fig, ax = plt.subplots(figsize=(8.4, 5.2), constrained_layout=True)
-    for payload in spectra_payload:
-        material = str(payload["material"])
-        site = str(payload["site"])
-        color = MATERIAL_COLORS.get(material, "#555555")
-        y = payload["intensity"] / norm_scale
-
+        y_max = max(y_max, float(np.max(intensity)))
         ax.plot(
             grid,
-            y,
+            intensity,
             color=color,
-            linewidth=2.0,
+            linestyle=SITE_LINESTYLES.get(site, "-"),
+            linewidth=1.8,
             alpha=0.95,
-            label=f"{material} ({SITE_SHORT.get(site, site)})",
+            label=f"{material} ({_site_label(site)})",
         )
-        ax.fill_between(grid, 0.0, y, color=color, alpha=0.10)
 
     ax.set_xlim(e_min, e_max)
-    ax.set_ylim(0.0, 1.06)
+    ax.set_ylim(0.0, 1.06 * y_max if y_max > 0.0 else 1.0)
     ax.set_xlabel("Excitation energy (eV)")
-    ax.set_ylabel("Normalized intensity (a.u.)")
-    ax.set_title("Gaussian-Broadened TDDFT Spectra (Best Site per Oxide)")
+    ax.set_ylabel("Broadened oscillator strength (eV$^{-1}$)")
+    ax.set_title("LrTDDFT Spectra of Isolated CO2 (Adsorbed Geometry)")
     ax.grid(axis="both", linestyle="--", linewidth=0.45, alpha=0.30)
     ax.text(
         0.015,
         0.965,
-        f"Gaussian broadening σ = {sigma_ev:.2f} eV",
+        f"Gaussian broadening σ = {sigma_ev:.2f} eV; oscillator strength f dimensionless",
         transform=ax.transAxes,
         ha="left",
         va="top",

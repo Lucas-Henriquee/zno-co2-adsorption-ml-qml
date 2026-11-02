@@ -1,10 +1,11 @@
-"""TDDFT post-processing without GPAW: units, oscillator strengths, onset, TRK, exit code."""
+"""TDDFT post-processing without GPAW: units, oscillator strengths, descriptors, TRK, basis, exit code."""
 import csv
 import math
 import sys
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
+import types
 import unittest
 
 import numpy as np
@@ -37,7 +38,7 @@ class FakeLrTDDFT:
         return iter(self._excitations)
 
 
-# Transition 1 is dark (f below threshold): first excitation != onset.
+# Transition 1 is dark (f below threshold): first excitation != first bright excitation.
 ENERGIES_HA = [0.30, 0.35, 0.40, 0.60]
 STRENGTHS = [1.0e-5, 0.02, 0.50, 0.10]
 
@@ -76,21 +77,94 @@ class SummaryTests(unittest.TestCase):
         options.update(kwargs)
         return run_tddft.summarize_transitions(energies, f, **options)
 
-    def test_onset_applies_threshold_to_f(self):
+    def test_first_bright_excitation_applies_threshold_to_f(self):
         summary = self.summarize()
         self.assertAlmostEqual(summary["co2_isolated_first_excitation_ev"], 0.30 * Hartree)
-        self.assertAlmostEqual(summary["co2_isolated_onset_ev"], 0.35 * Hartree)
+        self.assertAlmostEqual(summary["co2_isolated_first_excitation_f"], 1.0e-5)
+        self.assertAlmostEqual(summary["co2_isolated_first_bright_excitation_ev"], 0.35 * Hartree)
         self.assertAlmostEqual(summary["co2_isolated_peak_ev"], 0.40 * Hartree)
         self.assertAlmostEqual(summary["co2_isolated_peak_f"], 0.50)
-        self.assertTrue(math.isnan(self.summarize(osc_threshold=1.0)["co2_isolated_onset_ev"]))
+        self.assertTrue(math.isnan(self.summarize(osc_threshold=1.0)["co2_isolated_first_bright_excitation_ev"]))
+        self.assertNotIn("co2_isolated_onset_ev", summary)
+        self.assertNotIn("co2_isolated_total_f", summary)
 
-    def test_trk_sum_uses_all_transitions(self):
+    def test_descriptors_use_all_transitions_and_max_transitions_only_limits_rows(self):
+        # The brightest transition (index 3) lies beyond max_transitions=2.
         summary = self.summarize(max_transitions=2)
         self.assertAlmostEqual(summary["trk_sum"], sum(STRENGTHS))
         self.assertAlmostEqual(summary["trk_fraction"], sum(STRENGTHS) / 16.0)
-        self.assertAlmostEqual(summary["co2_isolated_total_f"], STRENGTHS[0] + STRENGTHS[1])
+        self.assertAlmostEqual(summary["co2_isolated_peak_ev"], 0.40 * Hartree)
+        self.assertAlmostEqual(summary["co2_isolated_peak_f"], 0.50)
         self.assertEqual(summary["co2_isolated_num_transitions"], 2.0)
         self.assertEqual(summary["co2_isolated_num_transitions_computed"], 4.0)
+        self.assertEqual(self.summarize(max_transitions=0)["co2_isolated_num_transitions"], 4.0)
+        self.assertEqual(self.summarize(max_transitions=10)["co2_isolated_num_transitions"], 4.0)
+
+    def test_first_bright_is_flagged_against_ks_ionization_threshold(self):
+        first_bright = 0.35 * Hartree
+        summary = self.summarize(ks_ionization_threshold_ev=first_bright - 1.0)
+        self.assertEqual(summary["co2_isolated_first_bright_above_ks_threshold"], 1.0)
+        self.assertAlmostEqual(summary["co2_isolated_ks_ionization_threshold_ev"], first_bright - 1.0)
+        summary = self.summarize(ks_ionization_threshold_ev=first_bright + 1.0)
+        self.assertEqual(summary["co2_isolated_first_bright_above_ks_threshold"], 0.0)
+        summary = self.summarize()
+        self.assertTrue(math.isnan(summary["co2_isolated_ks_ionization_threshold_ev"]))
+        self.assertTrue(math.isnan(summary["co2_isolated_first_bright_above_ks_threshold"]))
+
+
+class KSThresholdTests(unittest.TestCase):
+    def test_threshold_is_minus_homo(self):
+        class Calc:
+            def get_homo_lumo(self):
+                return np.array([-9.3, -1.2])
+
+        self.assertAlmostEqual(run_tddft.ks_ionization_threshold(Calc()), 9.3)
+
+    def test_threshold_is_nan_when_unavailable(self):
+        class Calc:
+            def get_homo_lumo(self):
+                raise AttributeError("no eigenvalues")
+
+        self.assertTrue(math.isnan(run_tddft.ks_ionization_threshold(Calc())))
+        self.assertTrue(math.isnan(run_tddft.ks_ionization_threshold(object())))
+
+
+class CasidaBasisTests(unittest.TestCase):
+    def test_lrtddft_basis_excludes_unconverged_buffer_bands(self):
+        params = run_tddft.ground_state_parameters(make_args())
+        self.assertEqual(params["gs_nbands"], 76)
+        self.assertEqual(params["gs_converged_bands"], 68)
+        self.assertEqual(params["lr_jend_band_index"], 67)
+
+        captured = {}
+
+        class RecordingLrTDDFT(FakeLrTDDFT):
+            def __init__(self, calc, restrict=None, txt=None):
+                captured["restrict"] = restrict
+                super().__init__(ENERGIES_HA, STRENGTHS)
+
+            def diagonalize(self):
+                pass
+
+        class Calc:
+            def get_number_of_electrons(self):
+                return 16.0
+
+            def get_homo_lumo(self):
+                return np.array([-9.0, -1.0])
+
+        fake_lrtddft_module = types.ModuleType("gpaw.lrtddft")
+        fake_lrtddft_module.LrTDDFT = RecordingLrTDDFT
+        with TemporaryDirectory() as directory:
+            xyz = Path(directory) / "co2.xyz"
+            xyz.write_text("stub\n")
+            with patch.dict(sys.modules, {"gpaw": types.ModuleType("gpaw"), "gpaw.lrtddft": fake_lrtddft_module}), \
+                    patch.object(run_tddft, "_build_isolated_co2_ground_state", return_value=Calc()):
+                energies, f, _, valence, threshold = run_tddft.run_lrtddft(xyz, Path(directory), params)
+        self.assertEqual(captured["restrict"], {"energy_range": 30.0, "jend": 67})
+        np.testing.assert_allclose(f, STRENGTHS)
+        self.assertEqual(valence, 16.0)
+        self.assertAlmostEqual(threshold, 9.0)
 
 
 class WorkflowTests(unittest.TestCase):
@@ -115,7 +189,7 @@ class WorkflowTests(unittest.TestCase):
             if fail_site and fail_site in str(out_dir):
                 raise RuntimeError("SCF did not converge")
             energies, f, fxyz = run_tddft.extract_transitions(FakeLrTDDFT(ENERGIES_HA, STRENGTHS))
-            return energies, f, fxyz, 16.0
+            return energies, f, fxyz, 16.0, 9.0
 
         with patch.multiple(
             run_tddft,
@@ -136,21 +210,29 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(failures, 0)
             self.assertEqual(list(summary["site"]), ["top_metal", "bridge"])
             self.assertNotIn("TiO2", set(summary["material"]))
-            for column in run_tddft.RESULT_COLUMNS + ("tddft_status", "tddft_mode", "gs_nbands", "lr_energy_window_ev"):
+            for column in run_tddft.RESULT_COLUMNS + (
+                "tddft_status", "tddft_mode", "gs_nbands", "lr_energy_window_ev", "lr_jend_band_index"
+            ):
                 self.assertIn(column, summary.columns)
             self.assertFalse(any(column.startswith("tddft_onset") for column in summary.columns))
             self.assertEqual(int(summary["gs_nbands"].iloc[0]), 76)  # 68 converged + 8 buffer bands
-            self.assertAlmostEqual(summary["co2_isolated_onset_ev"].iloc[0], 0.35 * Hartree)
+            self.assertEqual(int(summary["lr_jend_band_index"].iloc[0]), 67)
+            self.assertAlmostEqual(summary["co2_isolated_first_bright_excitation_ev"].iloc[0], 0.35 * Hartree)
+            self.assertAlmostEqual(summary["co2_isolated_ks_ionization_threshold_ev"].iloc[0], 9.0)
+            # 0.35 Ha = 9.52 eV lies above -eps_HOMO = 9.0 eV.
+            self.assertEqual(summary["co2_isolated_first_bright_above_ks_threshold"].iloc[0], 1.0)
             transitions = pd.read_csv(root / "tddft" / "ZnO" / "bridge" / "transitions.csv")
             np.testing.assert_allclose(transitions["energy_ev"], np.asarray(ENERGIES_HA) * Hartree)
             np.testing.assert_allclose(transitions["oscillator_strength"], STRENGTHS)
 
-            # The dataset builder reads the new columns.
+            # The reference-table builder reads the new columns and writes no features or labels.
             frame = dataset.read_summary(root / "tddft_summary.csv")
             built = dataset.build_summary_dataset(frame)
-            self.assertAlmostEqual(built["feature_2_co2_isolated_onset_ev"].iloc[0], 0.35 * Hartree)
+            self.assertAlmostEqual(built["co2_isolated_first_bright_excitation_ev"].iloc[0], 0.35 * Hartree)
             merged = dataset.build_transitions_dataset(frame, dataset.read_transitions(root / "tddft"))
             self.assertEqual(len(merged), 8)
+            for table in (built, merged):
+                self.assertFalse([col for col in table.columns if col.startswith("feature_") or col.startswith("label")])
 
     def test_failed_case_is_reported_and_counted(self):
         rows = [{"material": "ZnO", "site": site, "dft_status": "ok"} for site in ("top_metal", "bridge")]

@@ -10,6 +10,7 @@ from scripts.simulations.neb.run_neb import (
     STATUS_CONVERGED,
     barrier_metrics,
     discover_neb_runs,
+    endpoint_flag_text,
     read_image_energies,
     resolve_barrier_resolution,
 )
@@ -23,6 +24,14 @@ BARRIER_FIELDS = (
     "no_internal_saddle",
     "barrier_resolution_eV",
     "barrier_resolved",
+    "reverse_barrier_resolved",
+    "initial_dip_eV",
+    "final_dip_eV",
+    "initial_not_minimum",
+    "final_not_minimum",
+    "endpoint_not_minimum",
+    "lowest_image_index",
+    "barrier_from_lowest_eV",
     "n_total_images",
 )
 
@@ -89,6 +98,7 @@ def build_rows(base: Path, resolution_ev: float = DEFAULT_BARRIER_RESOLUTION_EV)
                 "rel_energy_eV": e_rel,
                 "is_highest_image": i == metrics["highest_image_index"],
                 "is_highest_internal_image": i == metrics["highest_internal_image_index"],
+                "is_lowest_image": i == metrics["lowest_image_index"],
             })
 
         barrier_rows.append({
@@ -98,12 +108,15 @@ def build_rows(base: Path, resolution_ev: float = DEFAULT_BARRIER_RESOLUTION_EV)
             "status": status,
             **{key: metrics[key] for key in BARRIER_FIELDS},
             "climb_activated": meta.get("climb_activated", ""),
+            "climb_skipped": meta.get("climb_skipped", ""),
         })
 
         flags = []
+        if metrics["endpoint_not_minimum"]:
+            flags.append(endpoint_flag_text(metrics))
         if metrics["no_internal_saddle"]:
             flags.append("no internal saddle")
-        elif not metrics["barrier_resolved"]:
+        elif not metrics["barrier_resolved"] and not metrics["endpoint_not_minimum"]:
             flags.append(f"below {resolution_ev:.3f} eV resolution")
         flag = f"  [{'; '.join(flags)}]" if flags else ""
         print(
@@ -112,9 +125,16 @@ def build_rows(base: Path, resolution_ev: float = DEFAULT_BARRIER_RESOLUTION_EV)
             f"reaction dE = {metrics['reaction_energy_eV']:.4f} eV  |  "
             f"E_max image {metrics['highest_image_index']}{flag}"
         )
+        if metrics["endpoint_not_minimum"]:
+            print(
+                f"  -> lowest image {metrics['lowest_image_index']}  |  "
+                f"E_max - E_min = {metrics['barrier_from_lowest_eV']:.4f} eV (band not anchored on the "
+                f"DFT endpoints; no migration barrier reported)"
+            )
         print(
             f"  -> status = {status}{'' if status == STATUS_CONVERGED else '  (NOT CONVERGED)'}  |  "
-            f"climb_activated = {meta.get('climb_activated', '?')}  |  "
+            f"climb_activated = {meta.get('climb_activated', '?')}"
+            f"{'  (skipped: no internal maximum)' if meta.get('climb_skipped') else ''}  |  "
             f"fmax CI = {meta.get('fmax_ci', '?')}"
         )
         print()

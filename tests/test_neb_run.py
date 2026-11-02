@@ -15,6 +15,7 @@ try:
     from ase import Atoms
     from ase.calculators.calculator import Calculator, all_changes
     from ase.constraints import FixAtoms
+    from ase.calculators.singlepoint import SinglePointCalculator
     from ase.io import write
 except ImportError:  # pragma: no cover
     Atoms = None
@@ -137,6 +138,15 @@ class RunNebTests(unittest.TestCase):
         self.assertAlmostEqual(summary["forward_barrier_eV"], 3 * AMPLITUDE, places=3)
         self.assertAlmostEqual(summary["reverse_barrier_eV"], 3 * AMPLITUDE, places=3)
         self.assertFalse(summary["no_internal_saddle"])
+        self.assertFalse(summary["endpoint_not_minimum"])
+        self.assertTrue(summary["reverse_barrier_resolved"])
+        self.assertFalse(summary["climb_skipped"])
+        self.assertEqual(summary["phase2"], "climbing_image")
+        self.assertEqual(summary["neb_method"], "improvedtangent")
+        self.assertEqual(summary["spring_constant_ev_per_ang2"], 0.1)
+        phase = json.loads((self.results / "neb" / "ZnO" / "top_metal_to_bridge" / "neb_phase.json").read_text())
+        self.assertEqual(phase["phase"], "climbing_image")
+        self.assertEqual(phase["phase_start_step"], summary["n_steps_plain"])
         self.assertEqual(summary["calculator"]["profile"], "base")
         self.assertEqual(summary["calculator"]["smearing"], 0.05)
         self.assertEqual(len(summary["endpoint_files"]["initial"]["sha256"]), 64)
@@ -258,6 +268,88 @@ class RunNebTests(unittest.TestCase):
             barriers = {row["pair"]: row for row in csv.DictReader(handle)}
         self.assertAlmostEqual(float(barriers["top_metal_to_bridge"]["forward_barrier_eV"]), 3 * AMPLITUDE, places=3)
         self.assertEqual(float(barriers["top_metal_to_bridge"]["barrier_resolution_eV"]), 0.01)
+
+    def test_plots_draw_no_barrier_for_unresolved_pairs(self):
+        from scripts.analysis import neb_energy_table
+        from scripts.visualization import plot_neb
+
+        def result(initial, final, energies):
+            return {
+                **run_neb.barrier_metrics(energies, resolution_ev=0.03),
+                "initial_site": initial, "final_site": final, "folder_name": f"{initial}_to_{final}",
+                "pathway": plot_neb.pathway_label(initial, final), "status": "converged", "converged": True,
+                "climb_activated": False, "climb_skipped": True, "band_fit": None,
+            }
+
+        results = [
+            result("top_metal", "bridge", [0.0, -0.0335, -0.0953, -0.1027, -0.0664]),
+            result("bridge", "top_oxygen", [0.0, 0.0003, 0.0130, 0.0287, 0.0136]),
+            result("a", "b", [0.0, 0.2, 0.5, 0.2, 0.1]),
+        ]
+        figures = []
+        with mock.patch.object(plot_neb.plt, "close", side_effect=figures.append), \
+                contextlib.redirect_stdout(io.StringIO()):
+            plot_neb.plot_barriers(results, self.results, dpi=20)
+            plot_neb.plot_individual_profile(results[0], self.results, dpi=20)
+        ax = figures[0].axes[0]
+        heights = [patch.get_height() for patch in ax.patches]
+        finite = sorted(round(h, 4) for h in heights if np.isfinite(h))
+        self.assertEqual(finite, [0.4, 0.5])  # only the resolved pair a -> b
+        notes = [text.get_text() for text in ax.texts]
+        self.assertIn("no resolved barrier\n(initial and final endpoint not a minimum along the band)", notes)
+        self.assertIn("no resolved barrier\n(barrier below 0.03 eV resolution)", notes)
+        self.assertNotIn("0.000", notes)
+        profile_text = " ".join(text.get_text() for text in figures[1].axes[0].texts)
+        self.assertIn("No resolved barrier", profile_text)
+        self.assertNotIn("Forward barrier", profile_text)
+        self.assertIn("initial dip = 0.103 eV", profile_text)
+        for fig in figures:
+            plot_neb.plt.close(fig)
+
+        # Table: CSV columns and the printed endpoint line.
+        base = self.results / "neb" / "ZnO"
+        folder = base / "top_metal_to_bridge"
+        folder.mkdir(parents=True)
+        (folder / "neb_run_summary.json").write_text(json.dumps({
+            "material": "ZnO", "initial_site": "top_metal", "final_site": "bridge", "status": "converged",
+            "climb_activated": False, "climb_skipped": True}))
+        frames = []
+        for energy in [0.0, -0.0335, -0.0953, -0.1027, -0.0664]:
+            atoms = _structure()
+            atoms.calc = SinglePointCalculator(atoms, energy=energy, forces=np.zeros((len(atoms), 3)))
+            frames.append(atoms)
+        write(folder / "neb_final_images.traj", frames)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            neb_energy_table.main(["--base", str(base), "--barrier-resolution", "0.03"])
+        self.assertIn("[endpoint not a minimum along the band: initial dip 0.103 eV, final dip 0.036 eV; "
+                      "no internal saddle]", out.getvalue())
+        with (base / "comparison_plots" / "neb_barriers.csv").open() as handle:
+            row = next(csv.DictReader(handle))
+        self.assertEqual(row["initial_not_minimum"], "True")
+        self.assertEqual(row["final_not_minimum"], "True")
+        self.assertEqual(row["endpoint_not_minimum"], "True")
+        self.assertEqual(row["lowest_image_index"], "3")
+        self.assertAlmostEqual(float(row["barrier_from_lowest_eV"]), 0.1027)
+        self.assertEqual(row["barrier_resolved"], "False")
+        self.assertEqual(row["reverse_barrier_resolved"], "False")
+        self.assertEqual(row["climb_skipped"], "True")
+
+    def test_band_energies_after_a_real_ase_run(self):
+        # ASE NEB keeps neb.energies of the last get_forces call (the final positions).
+        from ase.mep import NEB
+        from ase.optimize import FIRE
+
+        images = [_structure(0.0)] + [_structure(0.0) for _ in range(3)] + [_structure(PERIOD)]
+        for image in images:
+            image.calc = _CorrugatedSurface(self.reference)
+        neb = NEB(images, k=run_neb.NEB_SPRING_CONSTANT, method=run_neb.NEB_METHOD)
+        neb.interpolate()
+        with contextlib.redirect_stdout(io.StringIO()):
+            FIRE(neb, logfile=None).run(fmax=0.5, steps=3)
+        expected = [float(image.get_potential_energy()) for image in images]
+        self.assertEqual(run_neb.current_band_energies(neb), expected)
+        self.assertTrue(run_neb.climb_decision(expected)[0])
 
     def test_smooth_band_fit_uses_stored_forces(self):
         self.write_endpoints({"top_metal": 0.0, "bridge": PERIOD})

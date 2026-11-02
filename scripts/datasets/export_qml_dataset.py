@@ -23,11 +23,11 @@ from scripts.common.project_config import RESULTS_DIR
 SITE_LABELS = {"top_metal": 0, "top_oxygen": 1, "bridge": 2}
 
 # Ranked-table column -> exported feature name. The band gap is a PBE Kohn-Sham
-# gap (Gamma grid); the TDDFT onset belongs to the isolated CO2 molecule.
+# gap (Gamma grid). TDDFT descriptors (isolated CO2, same on every site) are never
+# features and are not offered.
 FEATURE_COLUMNS = {
     "adsorption_energy_ev": "x_adsorption_energy",
     "adsorbed_band_gap_gamma_ev": "x_pbe_band_gap",
-    "co2_isolated_onset_ev": "x_co2_isolated_onset",
 }
 DEFAULT_FEATURES = ["adsorption_energy_ev", "adsorbed_band_gap_gamma_ev"]
 

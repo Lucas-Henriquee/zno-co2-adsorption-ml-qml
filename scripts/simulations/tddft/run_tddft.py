@@ -14,6 +14,21 @@ absorption-onset target (e.g. 2.2 eV): the first excitations of CO2 lie at
 ~8-10 eV. The slab .gpw (PW mode, several k-points) cannot be reused because
 GPAW LrTDDFT requires fd or lcao mode and a single (Gamma) k-point.
 
+Casida basis: Kohn-Sham transitions i -> j with j up to the last converged band
+(restrict jend = converged bands - 1; the unconverged buffer bands are excluded)
+and with KS transition energy within --energy-window.
+
+Descriptors (all over every computed transition; --max-transitions only limits the
+rows written to transitions.csv): first excitation (energy and f), first bright
+excitation (lowest transition with f >= --osc-threshold; not an absorption onset),
+peak (max f) and the TRK sum, which is the total oscillator strength.
+
+KS ionization threshold: -epsilon_HOMO of the isolated CO2 (non-periodic box, vacuum
+level ~0). With PBE, excitations above it lie in the Kohn-Sham continuum, which the
+finite box discretises into artificial bound states (Casida et al., J. Chem. Phys.
+108, 4439 (1998); Tozer and Handy, J. Chem. Phys. 109, 10180 (1998)); such
+transitions are flagged (co2_isolated_first_bright_above_ks_threshold).
+
 Units: GPAW returns excitation energies in Hartree; everything written by this
 script is in eV. Oscillator strengths are the dimensionless isotropic totals
 f_j = ex.get_oscillator_strength()[0].
@@ -43,16 +58,25 @@ STATUS_OK = "ok"
 
 RESULT_COLUMNS = (
     "co2_isolated_first_excitation_ev",
-    "co2_isolated_onset_ev",
+    "co2_isolated_first_excitation_f",
+    "co2_isolated_first_bright_excitation_ev",
     "co2_isolated_peak_ev",
     "co2_isolated_peak_f",
-    "co2_isolated_total_f",
+    "co2_isolated_ks_ionization_threshold_ev",
+    "co2_isolated_first_bright_above_ks_threshold",
     "co2_isolated_num_transitions",
     "co2_isolated_num_transitions_computed",
     "trk_sum",
     "trk_valence_electrons",
     "trk_fraction",
 )
+
+# Columns renamed since older tddft_summary.csv files; applied by the readers. The former
+# co2_isolated_total_f (sum over the first max_transitions only) has no successor: trk_sum
+# is the total.
+LEGACY_COLUMN_ALIASES = {
+    "co2_isolated_onset_ev": "co2_isolated_first_bright_excitation_ev",
+}
 
 
 def _require_gpaw() -> None:
@@ -85,7 +109,8 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=1.0e-3,
         help=(
-            "Oscillator strength f threshold: the onset is the lowest transition with f >= threshold."
+            "Oscillator strength f threshold: the first bright excitation is the lowest transition "
+            "with f >= threshold."
         ),
     )
     parser.add_argument(
@@ -93,9 +118,8 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=50,
         help=(
-            "Number of lowest-energy transitions kept for transitions.csv and the spectral descriptors. "
-            "Applied after diagonalisation (the LrTDDFT basis is limited by --energy-window); "
-            "the TRK sum always uses every computed transition. <= 0 keeps all."
+            "Number of lowest-energy transitions written to transitions.csv. The descriptors and "
+            "the TRK sum always use every computed transition. <= 0 writes all."
         ),
     )
     parser.add_argument("--grid-spacing", type=float, default=0.25, help="Real-space grid spacing h in Angstrom.")
@@ -127,7 +151,10 @@ def parse_args() -> argparse.Namespace:
         "--energy-window",
         type=float,
         default=30.0,
-        help="Maximal Kohn-Sham transition energy in eV included in the LrTDDFT basis (restrict energy_range).",
+        help=(
+            "Maximal Kohn-Sham transition energy in eV (restrict energy_range). The LrTDDFT basis is "
+            "limited by this window and by jend = last converged band (buffer bands excluded)."
+        ),
     )
     return parser.parse_args()
 
@@ -153,6 +180,8 @@ def ground_state_parameters(args: argparse.Namespace) -> dict[str, float | int |
         "gs_nbands": nbands,
         "gs_converged_bands": converged,
         "lr_energy_window_ev": float(args.energy_window),
+        # 0-based index of the last band in the Casida basis (KSSRestrictor jend, inclusive).
+        "lr_jend_band_index": converged - 1,
         "osc_threshold": float(args.osc_threshold),
         "max_transitions": int(args.max_transitions),
     }
@@ -301,22 +330,41 @@ def _valence_electrons(calc) -> float:
         return float("nan")
 
 
-def run_lrtddft(xyz_file: Path, out_dir: Path, params: dict) -> tuple[np.ndarray, np.ndarray, np.ndarray, float]:
-    """Ground state + LrTDDFT for the isolated CO2; returns (E_eV, f, f_xyz, valence electrons)."""
+def ks_ionization_threshold(calc) -> float:
+    """-epsilon_HOMO in eV of the isolated CO2 (non-periodic box, vacuum level ~0); NaN if unavailable."""
+    try:
+        homo = float(np.asarray(calc.get_homo_lumo(), dtype=float).reshape(-1)[0])
+    except Exception:
+        return float("nan")
+    return -homo if math.isfinite(homo) else float("nan")
+
+
+def run_lrtddft(
+    xyz_file: Path, out_dir: Path, params: dict
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, float, float]:
+    """Ground state + LrTDDFT for the isolated CO2.
+
+    Returns (E_eV, f, f_xyz, valence electrons, KS ionization threshold -epsilon_HOMO in eV).
+    """
     from gpaw.lrtddft import LrTDDFT
 
     if not xyz_file.exists():
         raise RuntimeError(f"TDDFT requires the optimized XYZ, but the file is missing: {xyz_file}")
     calc = _build_isolated_co2_ground_state(xyz_file=xyz_file, out_dir=out_dir, params=params)
     # txt is always this run's file (opened for writing); its content is never parsed.
+    # KSSRestrictor defaults to jend = sys.maxsize: without jend the unconverged buffer bands
+    # would enter the Casida basis.
     lr = LrTDDFT(
         calc,
-        restrict={"energy_range": float(params["lr_energy_window_ev"])},
+        restrict={
+            "energy_range": float(params["lr_energy_window_ev"]),
+            "jend": int(params["lr_jend_band_index"]),
+        },
         txt=str(out_dir / "lrtddft.txt"),
     )
     lr.diagonalize()
     energies_ev, f_total, f_xyz = extract_transitions(lr)
-    return energies_ev, f_total, f_xyz, _valence_electrons(calc)
+    return energies_ev, f_total, f_xyz, _valence_electrons(calc), ks_ionization_threshold(calc)
 
 
 def empty_summary() -> dict[str, float]:
@@ -329,8 +377,12 @@ def summarize_transitions(
     osc_threshold: float,
     max_transitions: int,
     valence_electrons: float,
+    ks_ionization_threshold_ev: float = float("nan"),
 ) -> dict[str, float]:
-    """Spectral descriptors of the isolated CO2 (all energies in eV, strengths are f)."""
+    """Spectral descriptors of the isolated CO2 over every computed transition (eV, f).
+
+    max_transitions only sets co2_isolated_num_transitions, the rows written to transitions.csv.
+    """
     energies_ev = np.asarray(energies_ev, dtype=float)
     f_total = np.asarray(f_total, dtype=float)
     if len(energies_ev) == 0 or len(energies_ev) != len(f_total):
@@ -344,21 +396,25 @@ def summarize_transitions(
     trk_sum = float(np.sum(f_total))
     trk_fraction = trk_sum / valence_electrons if valence_electrons and math.isfinite(valence_electrons) else float("nan")
 
-    if max_transitions > 0:
-        energies_ev = energies_ev[:max_transitions]
-        f_total = f_total[:max_transitions]
-
-    onset_candidates = energies_ev[f_total >= osc_threshold]
-    onset = float(onset_candidates[0]) if len(onset_candidates) > 0 else float("nan")
+    bright = energies_ev[f_total >= osc_threshold]
+    first_bright = float(bright[0]) if len(bright) > 0 else float("nan")
     peak_idx = int(np.argmax(f_total))
+    threshold = float(ks_ionization_threshold_ev)
+    if math.isfinite(first_bright) and math.isfinite(threshold):
+        above_threshold = 1.0 if first_bright > threshold else 0.0
+    else:
+        above_threshold = float("nan")
+    num_written = len(order) if max_transitions <= 0 else min(len(order), int(max_transitions))
 
     return {
         "co2_isolated_first_excitation_ev": float(energies_ev[0]),
-        "co2_isolated_onset_ev": onset,
+        "co2_isolated_first_excitation_f": float(f_total[0]),
+        "co2_isolated_first_bright_excitation_ev": first_bright,
         "co2_isolated_peak_ev": float(energies_ev[peak_idx]),
         "co2_isolated_peak_f": float(f_total[peak_idx]),
-        "co2_isolated_total_f": float(np.sum(f_total)),
-        "co2_isolated_num_transitions": float(len(energies_ev)),
+        "co2_isolated_ks_ionization_threshold_ev": threshold,
+        "co2_isolated_first_bright_above_ks_threshold": above_threshold,
+        "co2_isolated_num_transitions": float(num_written),
         "co2_isolated_num_transitions_computed": float(len(order)),
         "trk_sum": trk_sum,
         "trk_valence_electrons": float(valence_electrons),
@@ -419,7 +475,7 @@ def run_tddft_workflow(args: argparse.Namespace) -> int:
                     stale.unlink(missing_ok=True)
             try:
                 with timer(f"TDDFT (isolated CO2) -> {material} | {site}"):
-                    energies_ev, f_total, f_xyz, valence = run_lrtddft(
+                    energies_ev, f_total, f_xyz, valence, ks_threshold = run_lrtddft(
                         xyz_file=xyz_path,
                         out_dir=case_out,
                         params=params,
@@ -430,6 +486,7 @@ def run_tddft_workflow(args: argparse.Namespace) -> int:
                         osc_threshold=args.osc_threshold,
                         max_transitions=args.max_transitions,
                         valence_electrons=valence,
+                        ks_ionization_threshold_ev=ks_threshold,
                     )
                     if master:
                         keep = int(summary["co2_isolated_num_transitions"])
@@ -438,8 +495,10 @@ def run_tddft_workflow(args: argparse.Namespace) -> int:
                 rows.append(_case_row(material, site, STATUS_OK, params, summary=summary))
                 print0(
                     f"[tddft] {material} {site} isolated CO2: first={summary['co2_isolated_first_excitation_ev']:.4f} eV "
-                    f"onset(f>={args.osc_threshold:g})={summary['co2_isolated_onset_ev']:.4f} eV "
+                    f"first bright(f>={args.osc_threshold:g})="
+                    f"{summary['co2_isolated_first_bright_excitation_ev']:.4f} eV "
                     f"peak={summary['co2_isolated_peak_ev']:.4f} eV "
+                    f"-eps_HOMO={summary['co2_isolated_ks_ionization_threshold_ev']:.4f} eV "
                     f"TRK={summary['trk_sum']:.3f}/{summary['trk_valence_electrons']:g}"
                 )
             except Exception as exc:

@@ -19,13 +19,17 @@ import math
 from pathlib import Path
 
 from scripts.common.project_config import EXPLORATORY_SITES, RESULTS_DIR
+from scripts.simulations.tddft.run_tddft import LEGACY_COLUMN_ALIASES
 
 TDDFT_COLUMNS = (
     "co2_isolated_first_excitation_ev",
-    "co2_isolated_onset_ev",
+    "co2_isolated_first_bright_excitation_ev",
     "co2_isolated_peak_ev",
-    "co2_isolated_total_f",
+    "co2_isolated_peak_f",
+    "co2_isolated_ks_ionization_threshold_ev",
+    "co2_isolated_first_bright_above_ks_threshold",
     "trk_sum",
+    "trk_fraction",
 )
 
 
@@ -92,7 +96,10 @@ def merge_results(
     merged: list[dict[str, float | str]] = []
     for dft_row in dft_ok:
         key = (dft_row["material"], dft_row["site"])
-        tddft_row = tddft_map.get(key, {})
+        tddft_row = dict(tddft_map.get(key, {}))
+        for old, new in LEGACY_COLUMN_ALIASES.items():
+            if new not in tddft_row and old in tddft_row:
+                tddft_row[new] = tddft_row[old]
 
         adsorption_energy = safe_float(dft_row.get("adsorption_energy_ev"))
         if not math.isfinite(adsorption_energy):

@@ -1,13 +1,12 @@
-"""Summary and transition tables from the LrTDDFT spectrum of the isolated CO2.
+"""Summary and transition reference tables from the LrTDDFT spectrum of the isolated CO2.
 
 WARNING: these are excitations of the CO2 molecule alone, cut out of its adsorbed
 geometry and placed in a box, not of the ZnO/CO2 system. The physisorbed CO2
 keeps nearly the same (linear) geometry on every site, so the TDDFT descriptors
 are essentially identical across sites: they carry no information about the
 adsorption site and are NOT suitable as features for site classification. The
-tables are kept as spectroscopic references. Each row carries ``group`` =
-material/site (one TDDFT calculation); the transitions of one calculation are not
-independent samples and must never be split between train and test.
+tables are spectroscopic references only: they hold no ``feature_*`` columns and
+no site label. Each row carries ``group`` = material/site (one TDDFT calculation).
 """
 
 from __future__ import annotations
@@ -18,26 +17,37 @@ from pathlib import Path
 import pandas as pd
 
 from scripts.common.project_config import DATA_DIR
+from scripts.simulations.tddft.run_tddft import LEGACY_COLUMN_ALIASES
 
 CLASSIFICATION_WARNING = (
     "[tddft-dataset] WARNING: TDDFT descriptors of the isolated CO2 are (almost) identical "
-    "across sites and are not suitable for site classification; group = material/site "
-    "marks the single calculation behind every row."
+    "across sites and are not suitable for site classification; these are reference tables "
+    "(no feature_ columns, no label), group = material/site marks the single calculation "
+    "behind every row."
 )
 
-
-SITE_LABELS = {
-    "top_metal": 0,
-    "top_oxygen": 1,
-    "bridge": 2,
-}
+REQUIRED_COLUMNS = (
+    "co2_isolated_first_excitation_ev",
+    "co2_isolated_first_bright_excitation_ev",
+    "co2_isolated_peak_ev",
+)
+# Absent from older tddft_summary.csv files; written as NaN then.
+OPTIONAL_COLUMNS = (
+    "co2_isolated_first_excitation_f",
+    "co2_isolated_peak_f",
+    "co2_isolated_ks_ionization_threshold_ev",
+    "co2_isolated_first_bright_above_ks_threshold",
+    "trk_sum",
+    "trk_fraction",
+)
 
 
 def parse_args():
     parser = argparse.ArgumentParser(
         description=(
-            "Build summary and transition-level datasets from the LrTDDFT spectrum of the adsorbed CO2 "
-            "molecule isolated in a box (not the optical response of the ZnO-CO2 system)."
+            "Build summary and transition-level reference tables from the LrTDDFT spectrum of the "
+            "adsorbed CO2 molecule isolated in a box (not the optical response of the ZnO-CO2 "
+            "system; not ML features)."
         )
     )
     parser.add_argument("--summary", type=Path, required=True)
@@ -53,52 +63,23 @@ def read_summary(path: Path) -> pd.DataFrame:
     if not path.is_file():
         raise FileNotFoundError(f"TDDFT summary file not found: {path}")
     df = pd.read_csv(path)
+    df = df.rename(columns={old: new for old, new in LEGACY_COLUMN_ALIASES.items() if new not in df.columns})
 
-    required = {
-        "material",
-        "site",
-        "tddft_status",
-        "co2_isolated_total_f",
-        "co2_isolated_onset_ev",
-        "co2_isolated_peak_ev",
-    }
-    missing = sorted(required.difference(df.columns))
+    missing = sorted({"material", "site", "tddft_status", *REQUIRED_COLUMNS}.difference(df.columns))
     if missing:
         raise ValueError(f"TDDFT summary is missing columns: {missing}")
+    for column in OPTIONAL_COLUMNS:
+        if column not in df.columns:
+            df[column] = float("nan")
 
     df = df[df["tddft_status"] == "ok"].copy()
-
-    df["label_site"] = df["site"]
-    df["label_id"] = df["site"].map(SITE_LABELS)
-
-    if df["label_id"].isna().any():
-        raise ValueError("Unknown site found in summary.")
-
-    df["label_id"] = df["label_id"].astype(int)
     df["group"] = df["material"].astype(str) + "/" + df["site"].astype(str)
-
     return df
 
 
 def build_summary_dataset(summary: pd.DataFrame) -> pd.DataFrame:
-    data = summary.copy()
-
-    data["feature_1_co2_isolated_total_f"] = data["co2_isolated_total_f"]
-    data["feature_2_co2_isolated_onset_ev"] = data["co2_isolated_onset_ev"]
-    data["feature_3_co2_isolated_peak_ev"] = data["co2_isolated_peak_ev"]
-
-    cols = [
-        "material",
-        "site",
-        "group",
-        "label_site",
-        "label_id",
-        "feature_1_co2_isolated_total_f",
-        "feature_2_co2_isolated_onset_ev",
-        "feature_3_co2_isolated_peak_ev",
-    ]
-
-    return data[cols].sort_values(["material", "site"])
+    cols = ["material", "site", "group", *REQUIRED_COLUMNS, *OPTIONAL_COLUMNS]
+    return summary[cols].sort_values(["material", "site"])
 
 
 def read_transitions(tddft_dir: Path) -> pd.DataFrame:
@@ -123,42 +104,21 @@ def read_transitions(tddft_dir: Path) -> pd.DataFrame:
 
 
 def build_transitions_dataset(summary: pd.DataFrame, transitions: pd.DataFrame) -> pd.DataFrame:
-    summary_cols = [
-        "material",
-        "site",
-        "co2_isolated_peak_ev",
-    ]
-
     data = transitions.merge(
-        summary[summary_cols],
+        summary[["material", "site", "group", "co2_isolated_peak_ev"]],
         on=["material", "site"],
         how="inner",
     )
-
-    data["label_site"] = data["site"]
-    data["label_id"] = data["site"].map(SITE_LABELS)
-
-    if data["label_id"].isna().any():
-        raise ValueError("Unknown site found in transitions.")
-
-    data["label_id"] = data["label_id"].astype(int)
-    # Every transition of one calculation shares this id (grouped splits only).
-    data["group"] = data["material"].astype(str) + "/" + data["site"].astype(str)
-
-    data["feature_1_energy_ev"] = data["energy_ev"]
-    data["feature_2_oscillator_strength"] = data["oscillator_strength"]
-    data["feature_3_delta_from_peak_ev"] = (data["energy_ev"] - data["co2_isolated_peak_ev"])
+    data["delta_from_peak_ev"] = data["energy_ev"] - data["co2_isolated_peak_ev"]
 
     cols = [
         "material",
         "site",
         "group",
-        "label_site",
-        "label_id",
         "transition_index",
-        "feature_1_energy_ev",
-        "feature_2_oscillator_strength",
-        "feature_3_delta_from_peak_ev",
+        "energy_ev",
+        "oscillator_strength",
+        "delta_from_peak_ev",
     ]
 
     return data[cols].sort_values(["material", "site", "transition_index"])
@@ -169,12 +129,10 @@ def save_dataset(df: pd.DataFrame, path: Path):
     df.to_csv(path, index=False)
 
     print(f"\nSaved: {path}")
-    print(f"Samples: {len(df)}")
+    print(f"Rows: {len(df)}")
     if "group" in df.columns:
         print(f"Groups (independent TDDFT calculations): {df['group'].nunique()}")
     print(CLASSIFICATION_WARNING)
-    print("Classes:")
-    print(df["label_site"].value_counts())
 
 
 def main():

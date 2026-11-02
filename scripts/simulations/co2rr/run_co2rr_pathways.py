@@ -23,6 +23,7 @@ import csv
 import hashlib
 import json
 import math
+import re
 import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -96,6 +97,24 @@ INTERMEDIATE_HEIGHTS = {
     "o": {"top_metal": 1.85, "top_oxygen": 1.50, "bridge": 1.60},
 }
 DESORBED_C_SLAB_DISTANCE_ANG = 2.5
+
+# Validity of a site's pathway from the geometry flags of check_adsorbate_bonds. It is a
+# separate column (pathway_validity) from pathway_status, which only says whether the
+# calculation finished and drives resume/retry.
+#   wrong_intermediate: the relaxed COOH*/CO* is not that intermediate (dissociated,
+#                       deprotonated, C bonded to lattice O); takes precedence.
+#   unbound:            COOH* or CO* desorbed from the slab.
+# Either way the site gets no limiting potential (limiting_potential_v NaN) and no rank;
+# the formal value stays in limiting_potential_if_bound_v.
+VALIDITY_OK = "ok"
+VALIDITY_UNBOUND = "unbound"
+VALIDITY_WRONG_INTERMEDIATE = "wrong_intermediate"
+WRONG_INTERMEDIATE_FLAGS = (
+    "cooh_c_bonded_to_lattice_o",
+    "cooh_dissociated",
+    "cooh_deprotonated",
+    "co_dissociated",
+)
 
 # Stoichiometry of each step: species -> coefficient (products > 0, reactants < 0).
 # "H+e-" is a proton-electron pair, G(H+ + e-) = 1/2 G(H2) - eU (CHE).
@@ -793,6 +812,23 @@ def check_adsorbate_bonds(atoms, n_slab_atoms: int, intermediate: str) -> tuple[
     return flags, binding_to_slab
 
 
+def pathway_validity(geometry_flags) -> str:
+    """ok, unbound or wrong_intermediate from geometry flags (";"-joined string or list).
+
+    O* flags (o_star_peroxo) are ignored: O* is not part of the CO2 -> CO profile.
+    """
+    if isinstance(geometry_flags, str) or geometry_flags is None:
+        flags = str(geometry_flags or "").split(";")
+    else:
+        flags = list(geometry_flags)
+    flags = [str(flag).strip() for flag in flags if str(flag).strip()]
+    if any(flag in WRONG_INTERMEDIATE_FLAGS for flag in flags):
+        return VALIDITY_WRONG_INTERMEDIATE
+    if any(flag.endswith("_desorbed") and not flag.startswith("o_") for flag in flags):
+        return VALIDITY_UNBOUND
+    return VALIDITY_OK
+
+
 # --------------------------------------------------------------------------- thermochemistry
 
 
@@ -1009,8 +1045,13 @@ def build_result_row(
 
     for step in ("CO2_adsorption", *PATHWAY_STEPS, "overall"):
         row[f"{prefix}_{step}_ev"] = at_u[step]
-    row["limiting_step"] = limiting_step
-    row["limiting_potential_v"] = u_limiting
+    # pathway_status stays "ok" (the calculation finished; resume/retry depend on it);
+    # a site whose intermediates are unbound or not COOH*/CO* gets no U_L.
+    validity = pathway_validity(flags)
+    row["pathway_validity"] = validity
+    row["limiting_step"] = limiting_step if validity == VALIDITY_OK else ""
+    row["limiting_potential_v"] = u_limiting if validity == VALIDITY_OK else float("nan")
+    row["limiting_potential_if_bound_v"] = u_limiting
     if "O*" in terms:
         row[f"{prefix}_O_formation_from_H2O_ev"] = at_u["O_formation_from_H2O"]
     row["notes"] = (
@@ -1026,12 +1067,14 @@ def pathway_failure_row(material: str, site: str, message: str, status: str = "f
         "material": material,
         "site": site,
         "pathway_status": status,
+        "pathway_validity": "",
         "energy_basis": energy_basis(vibrations),
         "error_message": message,
         "geometry_flags": "",
         "profile": "none",
         "limiting_step": "",
         "limiting_potential_v": float("nan"),
+        "limiting_potential_if_bound_v": float("nan"),
         "notes": "",
     }
 
@@ -1214,6 +1257,78 @@ def compute_site_in_profile(material: str, site: str, profile: dict[str, object]
     )
 
 
+_GPAW_KPTS_RE = re.compile(r"^\s*kpts:\s*\[([0-9,\s]+)\]", re.MULTILINE)
+_GPAW_ECUT_RE = re.compile(r"\becut:\s*([0-9.eE+-]+)")
+
+
+def gpaw_log_settings(path: Path) -> tuple[float, str]:
+    """(ecut in eV, kpts as "AxBxC") from the input-parameter block of a GPAW txt log.
+
+    The last block wins (a log may hold several calculator starts). NaN/"" when absent.
+    """
+    try:
+        text = Path(path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return float("nan"), ""
+    ecuts = _GPAW_ECUT_RE.findall(text)
+    kpts = _GPAW_KPTS_RE.findall(text)
+    ecut = safe_float(ecuts[-1]) if ecuts else float("nan")
+    label = "x".join(part for part in re.split(r"[,\s]+", kpts[-1].strip()) if part) if kpts else ""
+    return ecut, label
+
+
+def _dft_log(folder: Path, label: str, profile_name: str) -> Path | None:
+    """GPAW log <label>.<profile>.txt written by run_dft.optimize_structure, else another profile's."""
+    exact = folder / f"{label}.{profile_name}.txt"
+    if exact.exists():
+        return exact
+    candidates = sorted(
+        path for path in folder.glob(f"{label}.*.txt") if path.name.count(".") == 2
+    ) if folder.is_dir() else []
+    return candidates[0] if candidates else None
+
+
+def dft_settings_source(material: str, site: str, dft_row: dict[str, str]) -> dict[str, tuple[float, str, str]]:
+    """ecut/kpts of the E(*) and E(CO2*) that dft_summary.csv holds, with their source.
+
+    dft_summary.csv carries ecut_ev and kpts per row (run_dft.py upsert_row); summaries
+    without them fall back to the GPAW logs of the DFT run.
+    """
+    ecut = safe_float(dft_row.get("ecut_ev"))
+    kpts = str(dft_row.get("kpts", "") or "").strip()
+    if math.isfinite(ecut) and kpts:
+        source = "dft_summary.csv"
+        return {"clean": (ecut, kpts, source), "adsorbed": (ecut, kpts, source)}
+    profile_name = str(dft_row.get("dft_profile", ""))
+    logs = {
+        "clean": _dft_log(dft_clean_slab_path(material, profile_name).parent, "clean_slab", profile_name),
+        "adsorbed": _dft_log(DFT_RESULTS_DIR / material / site, f"{material}_{site}", profile_name),
+    }
+    out: dict[str, tuple[float, str, str]] = {}
+    for key, path in logs.items():
+        if path is None:
+            out[key] = (float("nan"), "", "no ecut_ev/kpts in dft_summary.csv and no GPAW log")
+        else:
+            log_ecut, log_kpts = gpaw_log_settings(path)
+            out[key] = (log_ecut, log_kpts, str(path))
+    return out
+
+
+def dft_settings_mismatch(material: str, site: str, dft_row: dict[str, str], ecut: float, kpts) -> str:
+    """Why the DFT energies cannot be reused with this run's ecut/kpts ("" if they can)."""
+    expected_kpts = "x".join(str(int(v)) for v in kpts)
+    problems: list[str] = []
+    for key, (row_ecut, row_kpts, source) in dft_settings_source(material, site, dft_row).items():
+        if not math.isfinite(row_ecut) or not row_kpts:
+            problems.append(f"{key}: cannot verify ecut/kpts ({source})")
+            continue
+        if not math.isclose(row_ecut, float(ecut), rel_tol=0.0, abs_tol=1.0e-6):
+            problems.append(f"{key}: ecut {row_ecut:g} eV != {float(ecut):g} eV ({source})")
+        if row_kpts != expected_kpts:
+            problems.append(f"{key}: kpts {row_kpts} != {expected_kpts} ({source})")
+    return "; ".join(problems)
+
+
 def run_site(material: str, site: str, dft_row: dict[str, str] | None, ctx: RunContext) -> dict[str, float | str]:
     vibrations = bool(ctx.settings["vibrations"])
     if not dft_row:
@@ -1234,6 +1349,15 @@ def run_site(material: str, site: str, dft_row: dict[str, str] | None, ctx: RunC
                 f"dft_summary.csv {column}={dft_row.get(column, 'missing')} is not <= fmax {ctx.args.fmax}; rerun run_dft.py",
                 "inconsistent", vibrations,
             )
+    # ... and computed with this run's plane-wave cutoff and k-mesh.
+    mismatch = dft_settings_mismatch(material, site, dft_row, ctx.args.ecut, ctx.kpts)
+    if mismatch:
+        return pathway_failure_row(
+            material, site,
+            f"E(*)/E(CO2*) of dft_summary.csv not reusable with ecut={ctx.args.ecut:g} eV, "
+            f"kpts={'x'.join(str(int(v)) for v in ctx.kpts)}: {mismatch}; rerun run_dft.py with the same settings",
+            "inconsistent", vibrations,
+        )
 
     errors: list[str] = []
     for profile in profiles_for_case(material, preferred, ctx.catalog):
@@ -1300,7 +1424,11 @@ def run_pathways(args: argparse.Namespace) -> list[tuple[str, str]]:
                 print0(
                     f"[pathways] {material} {site} done ({row['energy_basis']}): "
                     + " ".join(f"{step}={float(row[f'{prefix}_{step}_ev']):.3f}" for step in PATHWAY_STEPS)
-                    + f" eV, U_L={float(row['limiting_potential_v']):.3f} V vs RHE"
+                    + (
+                        f" eV, U_L={float(row['limiting_potential_v']):.3f} V vs RHE"
+                        if row.get("pathway_validity") == VALIDITY_OK
+                        else f" eV, no U_L ({row.get('pathway_validity')})"
+                    )
                     + (f" flags={row['geometry_flags']}" if row["geometry_flags"] else "")
                 )
             else:

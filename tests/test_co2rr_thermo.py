@@ -234,8 +234,16 @@ def test_analysis_reads_new_columns_and_ignores_legacy_rows():
     ]
     table = analysis.build_pathway_table(merged, pathway)
     assert table[0]["dG_CO2_to_COOH_ev"] == 0.4
-    assert table[0]["limiting_potential_v"] == -0.4
+    # Old summary without pathway_validity: the desorbed CO* is recognised from the flags,
+    # so the site gets no U_L (formal value kept) even though pathway_status is ok.
+    assert table[0]["pathway_validity"] == "unbound"
+    assert math.isnan(table[0]["limiting_potential_v"])
+    assert table[0]["limiting_potential_if_bound_v"] == -0.4
+    assert table[0]["limiting_step"] == ""
     assert "co_desorbed" in table[0]["notes"]
+    pathway[0]["geometry_flags"] = ""
+    table = analysis.build_pathway_table(merged, pathway)
+    assert table[0]["limiting_potential_v"] == -0.4 and table[0]["pathway_validity"] == "ok"
     assert math.isnan(table[1]["dG_CO2_to_COOH_ev"])
     assert not any(key.startswith("deltaG") for key in table[0])
     legacy = [{"material": "ZnO", "site": "top_metal", "pathway_status": "ok", "deltaG_CO2_to_COOH_ev": "1"}]

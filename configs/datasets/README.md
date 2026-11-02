@@ -21,12 +21,18 @@ without editing YAML:
   `carbonate` is excluded. Band gaps are read from `*_band_gap_gamma_ev` (PBE
   Kohn-Sham gaps, not comparable to the experimental 3.37 eV).
 - `tddft_summary.csv` (optional): `co2_isolated_first_excitation_ev`,
-  `co2_isolated_onset_ev`, `co2_isolated_peak_ev`, `co2_isolated_total_f`, rows
-  with `tddft_status == ok`. These describe the isolated CO2 molecule, are
+  `co2_isolated_first_bright_excitation_ev` (lowest transition with
+  f >= threshold, not an absorption onset), `co2_isolated_peak_ev`,
+  `co2_isolated_peak_f`, `co2_isolated_ks_ionization_threshold_ev`
+  (-epsilon_HOMO) and `trk_sum` (the total oscillator strength), rows with
+  `tddft_status == ok`. Older files with `co2_isolated_onset_ev` are read as
+  `co2_isolated_first_bright_excitation_ev`; their `co2_isolated_total_f` (a
+  truncated sum) is ignored. These describe the isolated CO2 molecule, are
   nearly identical for every site and are therefore never classification
-  features: the summary keeps them as `tddft_co2_isolated_*` reference columns
-  (no `feature_` prefix) and the MD datasets do not contain them. The `tddft`
-  method tables carry `group` = `material/site` and print the same warning.
+  features: the summary keeps them as `tddft_*` reference columns (no
+  `feature_` prefix) and the MD datasets do not contain them. The `tddft`
+  method writes reference tables only (no `feature_*` columns, no site label),
+  with `group` = `material/site`. `qml_features` offers no TDDFT column.
 - `md/<material>/<site>/md_frame_analysis.csv` (optional): written by
   `python -m scripts.analysis.md_trajectory_analysis --results-dir <run>`; adds
   the window site diagnostics below.

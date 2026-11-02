@@ -4,7 +4,9 @@ Only the consistent sequence * + CO2(g) -> COOH* -> CO* + H2O(g) -> * + CO(g) is
 The y axis says dG (CHE free energy) or dE (electronic energy only) from the
 summary's energy_basis column; O* is never part of this profile. When the corrected file
 of co2rr_corrections.py exists its variant (default c) is drawn at U = 0 V vs RHE.
-Sites whose COOH* or CO* desorbed are drawn in grey, labelled "unbound", without U_L.
+Sites whose COOH* or CO* desorbed ("unbound") or whose relaxed structure is not COOH*/CO*
+("wrong_intermediate", see run_co2rr_pathways.pathway_validity) are drawn in grey
+(wrong intermediates with dotted levels), labelled, and without U_L.
 """
 from __future__ import annotations
 
@@ -16,15 +18,18 @@ from pathlib import Path
 from scripts.analysis.co2rr_corrections import (
     CORRECTED_CSV,
     DEFAULT_VARIANT,
-    UNBOUND_STATUS,
+    INVALID_STATUSES,
     VARIANTS,
-    is_unbound,
     load_corrected_pathway_rows,
+    row_validity,
 )
 from scripts.common.project_config import RESULTS_DIR
 from scripts.simulations.co2rr.run_co2rr_pathways import (
     PATHWAY_STATES,
     PATHWAY_STEPS,
+    VALIDITY_OK,
+    VALIDITY_UNBOUND,
+    VALIDITY_WRONG_INTERMEDIATE,
     energy_prefix,
     pathway_profile,
     safe_float,
@@ -32,6 +37,10 @@ from scripts.simulations.co2rr.run_co2rr_pathways import (
 
 SITE_ORDER = ("top_metal", "top_oxygen", "bridge")
 SITE_LABELS = {"top_metal": "Top metal", "top_oxygen": "Top oxygen", "bridge": "Bridge"}
+VALIDITY_LABELS = {
+    VALIDITY_UNBOUND: "unbound, no $U_L$",
+    VALIDITY_WRONG_INTERMEDIATE: "not COOH*/CO*, no $U_L$",
+}
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -51,7 +60,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--unbound",
         choices=("grey", "hide"),
         default="grey",
-        help="Unbound sites (COOH*/CO* desorbed): draw greyed and labelled, or leave out.",
+        help="Sites without a valid pathway (COOH*/CO* desorbed, or not COOH*/CO* after relaxation): "
+             "draw greyed and labelled, or leave out.",
     )
     parser.add_argument("--output-dir", type=Path, default=RESULTS_DIR / "analysis" / "co2rr")
     parser.add_argument("--material", default="ZnO")
@@ -78,15 +88,17 @@ def read_rows(path: Path) -> list[dict[str, str]]:
 def site_profiles(
     rows: list[dict[str, str]], material: str, include_unbound: bool = True
 ) -> tuple[list[dict[str, object]], str]:
-    """Cumulative profile per ok (and, if requested, unbound) site; one energy basis only.
+    """Cumulative profile per ok (and, if requested, invalid) site; one energy basis only.
 
-    A site is unbound when its status says so or its geometry_flags contain "_desorbed";
-    its profile is returned with ``unbound`` True and no limiting potential.
+    The validity (ok, unbound, wrong_intermediate) is that of co2rr_corrections.row_validity:
+    the pathway_validity column, the corrected status or the geometry_flags. Invalid sites
+    are returned with ``validity`` != "ok" and no limiting potential; ``unbound`` is True
+    only for desorbed intermediates.
     """
     usable = [
         row for row in rows
         if row.get("material") == material
-        and row.get("pathway_status") in ("ok", UNBOUND_STATUS)
+        and row.get("pathway_status") in ("ok", *INVALID_STATUSES)
         and row.get("energy_basis")
     ]
     bases = {row["energy_basis"] for row in usable}
@@ -103,16 +115,18 @@ def site_profiles(
         steps = {step: safe_float(row.get(f"{prefix}_{step}_ev")) for step in PATHWAY_STEPS}
         if not all(math.isfinite(value) for value in steps.values()):
             continue
-        unbound = row.get("pathway_status") == UNBOUND_STATUS or is_unbound(row.get("geometry_flags", ""))
-        if unbound and not include_unbound:
+        validity = row_validity(row)
+        invalid = validity != VALIDITY_OK
+        if invalid and not include_unbound:
             continue
         profiles.append(
             {
                 "site": row["site"],
                 "profile": pathway_profile(steps),
-                "unbound": unbound,
-                "limiting_step": "" if unbound else row.get("limiting_step", ""),
-                "limiting_potential_v": float("nan") if unbound else safe_float(row.get("limiting_potential_v")),
+                "validity": validity,
+                "unbound": validity == VALIDITY_UNBOUND,
+                "limiting_step": "" if invalid else row.get("limiting_step", ""),
+                "limiting_potential_v": float("nan") if invalid else safe_float(row.get("limiting_potential_v")),
                 "potential_v_rhe": safe_float(row.get("potential_v_rhe")),
                 "geometry_flags": row.get("geometry_flags", ""),
             }
@@ -138,14 +152,16 @@ def main(argv: list[str] | None = None) -> None:
     table_path = out_dir / "co2rr_pathway_profile_table.csv"
     with table_path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(
-            handle, fieldnames=["site", "state", value_column, "energy_basis", "source", "unbound", "potential_v_rhe"]
+            handle,
+            fieldnames=["site", "state", value_column, "energy_basis", "source", "validity", "unbound", "potential_v_rhe"],
         )
         writer.writeheader()
         for item in profiles:
             for state, value in zip(PATHWAY_STATES, item["profile"]):
                 writer.writerow(
                     {"site": item["site"], "state": state, value_column: value, "energy_basis": basis,
-                     "source": source, "unbound": item["unbound"], "potential_v_rhe": item["potential_v_rhe"]}
+                     "source": source, "validity": item["validity"], "unbound": item["unbound"],
+                     "potential_v_rhe": item["potential_v_rhe"]}
                 )
 
     fig, ax = plt.subplots(figsize=(8, 5))
@@ -153,10 +169,14 @@ def main(argv: list[str] | None = None) -> None:
     bound_index = 0
     for item in profiles:
         label = SITE_LABELS.get(str(item["site"]), str(item["site"]))
-        if item["unbound"]:
-            # Not a bound pathway: grey, no U_L, behind the bound sites.
-            label += " (unbound, no $U_L$)"
+        level_style = "solid"
+        if item["validity"] != VALIDITY_OK:
+            # Not a valid COOH*/CO* pathway: grey, no U_L, behind the valid sites; wrong
+            # intermediates with dotted levels.
+            label += f" ({VALIDITY_LABELS.get(str(item['validity']), str(item['validity']))})"
             color, alpha, zorder = "0.6", 0.7, 1
+            if item["validity"] == VALIDITY_WRONG_INTERMEDIATE:
+                level_style = "dotted"
         else:
             label += f" ($U_L$ = {item['limiting_potential_v']:.2f} V vs RHE)"
             color, alpha, zorder = f"C{bound_index}", 1.0, 2
@@ -166,7 +186,7 @@ def main(argv: list[str] | None = None) -> None:
         # Horizontal level per state joined by thin dashed connectors.
         for idx, value in enumerate(item["profile"]):
             ax.hlines(value, idx - 0.3, idx + 0.3, linewidth=2.5, color=color, alpha=alpha, zorder=zorder,
-                      label=label if idx == 0 else None)
+                      linestyles=level_style, label=label if idx == 0 else None)
             if idx:
                 ax.plot([idx - 0.7, idx - 0.3], [item["profile"][idx - 1], value], linestyle="--",
                         linewidth=0.8, color=color, alpha=alpha, zorder=zorder)
@@ -189,8 +209,8 @@ def main(argv: list[str] | None = None) -> None:
 
     for item in profiles:
         print(f"Site: {item['site']} ({basis}, {source})")
-        if item["unbound"]:
-            print("  Unbound intermediate: no limiting potential")
+        if item["validity"] != VALIDITY_OK:
+            print(f"  {item['validity']}: no limiting potential")
         else:
             print(f"  Limiting step: {item['limiting_step']}, U_L = {item['limiting_potential_v']:.3f} V vs RHE")
         print(f"  Profile ({symbol}, eV): {[round(v, 4) for v in item['profile']]}")

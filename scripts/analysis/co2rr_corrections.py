@@ -21,9 +21,13 @@ CO2 + 2(H+ + e-) -> CO + H2O(g) is -0.24 - 0.19 = -0.43 eV; the experimental val
 
 The CHE arithmetic, stoichiometry, HarmonicThermo/IdealGasThermo handling and U_L are
 those of run_co2rr_pathways.py (species_energies, che_reaction_energies,
-limiting_potential), so variant (a) reproduces the summary of the run. Sites whose
-geometry_flags contain "_desorbed" (COOH or CO not bound to the slab after relaxation)
-get status "unbound": their steps are still listed but they have no U_L and no rank.
+limiting_potential), so variant (a) reproduces the summary of the run.
+
+Site validity comes from run_co2rr_pathways.pathway_validity (geometry_flags):
+"wrong_intermediate" (cooh_c_bonded_to_lattice_o, cooh_dissociated, cooh_deprotonated or
+co_dissociated: the relaxed structure is not COOH*/CO*; takes precedence) and "unbound"
+(COOH* or CO* desorbed). Such sites keep their steps but get no U_L
+(limiting_potential_v NaN, formal value in limiting_potential_if_bound_v) and no rank.
 """
 
 from __future__ import annotations
@@ -41,10 +45,14 @@ from scripts.simulations.co2rr.run_co2rr_pathways import (
     GAS_SPECIES,
     PATHWAY_STEPS,
     SPECIES_COLUMN,
+    VALIDITY_OK,
+    VALIDITY_UNBOUND,
+    VALIDITY_WRONG_INTERMEDIATE,
     TermResult,
     che_reaction_energies,
     limiting_potential,
     molecule_atoms,
+    pathway_validity,
     safe_float,
     species_energies,
 )
@@ -236,7 +244,25 @@ def variant_energies(
 
 
 def is_unbound(geometry_flags: str) -> bool:
-    return any(flag.strip().endswith("_desorbed") for flag in str(geometry_flags or "").split(";"))
+    """True if COOH* or CO* desorbed (validity "unbound"; wrong intermediates are separate)."""
+    return pathway_validity(geometry_flags) == VALIDITY_UNBOUND
+
+
+INVALID_STATUSES = (VALIDITY_UNBOUND, VALIDITY_WRONG_INTERMEDIATE)
+
+
+def row_validity(row: dict) -> str:
+    """Validity of a summary or corrected row: its pathway_validity column, else its
+    corrected status, else derived from geometry_flags (older summaries)."""
+    validity = str(row.get("pathway_validity", "") or "").strip()
+    if validity in INVALID_STATUSES:
+        return validity
+    status = str(row.get("pathway_status", row.get("status", "")) or "").strip()
+    if status in INVALID_STATUSES:
+        return status
+    # Stored "ok" or no column: the flags decide (summaries written before the
+    # wrong_intermediate class existed are re-checked this way).
+    return pathway_validity(row.get("geometry_flags", ""))
 
 
 def row_settings(row: dict[str, str]) -> tuple[float, dict[str, float], dict[str, float]]:
@@ -308,7 +334,7 @@ def correct_site(
             )
 
     temperature, pressures, run_corrections = row_settings(row)
-    status = "unbound" if is_unbound(row.get("geometry_flags", "")) else "ok"
+    status = pathway_validity(row.get("geometry_flags", ""))
     for item in out:
         variant = str(item["variant"])
         energies, n_floored, n_imag = variant_energies(
@@ -318,11 +344,12 @@ def correct_site(
         steps = che_reaction_energies(energies, 0.0)
         u_l, limiting_step = limiting_potential(steps)
         item["status"] = status
+        item["pathway_validity"] = status
         for step in STEP_COLUMNS:
             item[f"dG_{step}_ev"] = steps[step]
         if "O*" in terms:
             item["dG_O_formation_from_H2O_ev"] = steps["O_formation_from_H2O"]
-        # Unbound sites have no meaningful adsorbed intermediate, so no U_L and no rank.
+        # Unbound sites and wrong intermediates have no meaningful COOH*/CO*: no U_L, no rank.
         item["limiting_step"] = limiting_step if status == "ok" else ""
         item["limiting_potential_v"] = u_l if status == "ok" else float("nan")
         item["limiting_potential_if_bound_v"] = u_l
@@ -380,7 +407,7 @@ def compare_variant_a(rows: list[dict[str, float | str]], summary_rows: list[dic
     summary = {(row.get("material", ""), row.get("site", "")): row for row in summary_rows}
     worst = 0.0
     for row in rows:
-        if row["variant"] != "a" or row["status"] not in ("ok", "unbound"):
+        if row["variant"] != "a" or row["status"] not in (VALIDITY_OK, *INVALID_STATUSES):
             continue
         original = summary.get((str(row["material"]), str(row["site"])), {})
         for step in STEP_COLUMNS:
@@ -399,15 +426,17 @@ def compare_variant_a(rows: list[dict[str, float | str]], summary_rows: list[dic
 # --------------------------------------------------------------------------- readers
 
 
-UNBOUND_STATUS = "unbound"
+UNBOUND_STATUS = VALIDITY_UNBOUND
+WRONG_INTERMEDIATE_STATUS = VALIDITY_WRONG_INTERMEDIATE
 
 
 def load_corrected_pathway_rows(path: Path, variant: str = DEFAULT_VARIANT) -> list[dict[str, str]] | None:
     """Rows of one variant of co2rr_corrected_summary.csv in the co2rr_pathway_summary.csv layout.
 
     Returns None when the file does not exist. ``pathway_status`` is the corrected
-    status (ok, unbound, failed, ...); unbound rows keep their dG_* values but have no
-    limiting potential. All values are at U = 0 V vs RHE.
+    status (ok, unbound, wrong_intermediate, failed, ...); unbound and wrong_intermediate
+    rows keep their dG_* values but have no limiting potential. All values are at
+    U = 0 V vs RHE.
     """
     path = Path(path)
     if not path.exists():
@@ -464,12 +493,17 @@ def note_text(floor_cm: float, gas_corrections: dict[str, float], overall: dict[
         "",
         "- **a** - as computed: imaginary adsorbate modes removed from the partition function.",
         f"- **b** - quasi-harmonic floor: imaginary adsorbate modes and real adsorbate modes below "
-        f"{floor_cm:g} cm^-1 set to {floor_cm:g} cm^-1, which bounds their spurious entropy "
-        "(the usual quasi-harmonic treatment of low-frequency modes; Ribeiro, Marenich, Cramer, Truhlar, "
-        "J. Phys. Chem. B 115, 14556 (2011)). Gases are unchanged.",
+        f"{floor_cm:g} cm^-1 set to {floor_cm:g} cm^-1, which bounds their spurious entropy. "
+        "The floor value is a choice of this work: Ribeiro, Marenich, Cramer, Truhlar, J. Phys. Chem. B "
+        "115, 14556 (2011) raise low modes to 100 cm^-1. The sensitivity to it is obtained by rerunning "
+        "with `--low-mode-cm 100`. Gases are unchanged.",
         f"- **c** - (b) + semi-empirical gas-phase corrections for PBE (Granda-Marulanda, Rendon-Calle, "
         f"Builes, Illas, Koper, Calle-Vallejo, ACS Catal. 10, 6900 (2020)): "
-        f"G(CO2) {gas_corrections['CO2']:+.2f} eV, G(CO) {gas_corrections['CO']:+.2f} eV.",
+        f"G(CO2) {gas_corrections['CO2']:+.2f} eV, G(CO) {gas_corrections['CO']:+.2f} eV. "
+        "The correction is applied to CO2(g) and CO(g) only; the adsorbates are not corrected. "
+        f"Hence only the steps with a gas-phase CO2 or CO change: the CO2 adsorption step and "
+        f"* + CO2(g) -> COOH* shift by {-gas_corrections['CO2']:+.2f} eV, CO* -> * + CO(g) by "
+        f"{gas_corrections['CO']:+.2f} eV, and COOH* -> CO* + H2O(g) is unchanged.",
         "",
         "Sign convention of (c): G_corr = G_PBE - epsilon, with the PBE gas-phase errors "
         f"epsilon(CO2) = {-gas_corrections['CO2']:+.2f} eV and epsilon(CO) = {-gas_corrections['CO']:+.2f} eV. "
@@ -478,8 +512,10 @@ def note_text(floor_cm: float, gas_corrections: dict[str, float], overall: dict[
         f"{EXPERIMENTAL_OVERALL_EV:+.2f} eV.",
         "",
         "Sites whose relaxed COOH* or CO* is not bound to the slab (geometry flag `*_desorbed`) have status "
-        "`unbound`: their steps are listed but they get no U_L (`limiting_potential_v` empty; the formal value "
-        "is in `limiting_potential_if_bound_v`) and no rank.",
+        "`unbound`; sites whose relaxed structure is not COOH*/CO* (flags `cooh_c_bonded_to_lattice_o`, "
+        "`cooh_dissociated`, `cooh_deprotonated`, `co_dissociated`) have status `wrong_intermediate` "
+        "(takes precedence). Both are listed with their steps but get no U_L (`limiting_potential_v` empty; "
+        "the formal value is in `limiting_potential_if_bound_v`) and no rank.",
         "",
         "## Overall reaction (identical for every site)",
         "",
@@ -526,7 +562,7 @@ def run_corrections(
         extra = f" (experiment {EXPERIMENTAL_OVERALL_EV:+.2f} eV)" if variant == "c" else ""
         print(f"[co2rr-corrections] {material} {profile} variant {variant}: dG_overall = {value:+.3f} eV{extra}")
     for row in rows:
-        if row["status"] in ("ok", "unbound"):
+        if row["status"] in (VALIDITY_OK, *INVALID_STATUSES):
             u_l = row["limiting_potential_v"]
             print(
                 f"[co2rr-corrections] {row['material']} {row['site']} [{row['variant']}] {row['status']}: "

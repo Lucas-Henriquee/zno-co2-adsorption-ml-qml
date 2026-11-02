@@ -259,18 +259,19 @@ def section_tddft(ctx: Context, state: str) -> None:
     settings = ctx.method("tddft")
     print(dim(f"   fd h {settings.get('grid_spacing_angstrom', '?')} Å · box {settings.get('box_size_angstrom', '?')} Å · "
               f"{settings.get('converged_bands', '?')} converged bands · window {settings.get('energy_window_ev', '?')} eV · "
-              f"onset f ≥ {settings.get('oscillator_strength_threshold', '?')}"))
+              f"bright f ≥ {settings.get('oscillator_strength_threshold', '?')}"))
     rows_by_key = {(r.get("material"), r.get("site")): r for r in read_csv(ctx.root / "tddft_summary.csv")}
-    columns = [Column("case", 22, "<"), Column("1st exc/eV", 11), Column("onset/eV", 10), Column("peak/eV", 9),
-               Column("peak f", 8), Column("Σf", 7), Column("TRK", 6), Column("status / progress")]
+    columns = [Column("case", 22, "<"), Column("1st exc/eV", 11), Column("bright/eV", 10), Column("peak/eV", 9),
+               Column("peak f", 8), Column("-εHOMO/eV", 10), Column("TRK", 6), Column("status / progress")]
     rows = []
     for material in ctx.materials:
         for site in ctx.sites:
             row = rows_by_key.get((material, site), {})
             trk = as_float(row.get("trk_fraction"))
             rows.append([f"{material} {site}", fmt(row.get("co2_isolated_first_excitation_ev"), ".3f"),
-                         fmt(row.get("co2_isolated_onset_ev"), ".3f"), fmt(row.get("co2_isolated_peak_ev"), ".3f"),
-                         fmt(row.get("co2_isolated_peak_f"), ".3f"), fmt(row.get("co2_isolated_total_f"), ".3f"),
+                         fmt(row.get("co2_isolated_first_bright_excitation_ev", row.get("co2_isolated_onset_ev")), ".3f"),
+                         fmt(row.get("co2_isolated_peak_ev"), ".3f"), fmt(row.get("co2_isolated_peak_f"), ".3f"),
+                         fmt(row.get("co2_isolated_ks_ionization_threshold_ev"), ".3f"),
                          "—" if trk is None else f"{trk:.0%}", tddft_progress(ctx, state, material, site, row)])
     table(columns, rows)
 
@@ -432,23 +433,93 @@ def section_neb(ctx: Context, state: str) -> None:
             record.update(neb_barriers(folder, settings))
             steps = "—"
             if record.get("status"):
-                steps = f"{fmt(record.get('n_steps_plain'), '.0f')}+{fmt(record.get('n_steps_ci'), '.0f')}"
+                second = record.get("n_steps_phase2", record.get("n_steps_ci"))
+                if second in (None, ""):
+                    second = record.get("n_steps_ci")
+                steps = f"{fmt(record.get('n_steps_plain'), '.0f')}+{fmt(second, '.0f')}"
                 progress = ok_badge(str(record["status"]))
-                if str(record.get("no_internal_saddle")).lower() == "true":
-                    progress += dim("  no internal saddle")
-                elif str(record.get("barrier_resolved")).lower() == "false":
-                    progress += dim("  barrier below resolution")
+                notes = neb_flags(record)
+                if notes:
+                    progress += dim("  " + " · ".join(notes))
             elif state == "running" and (folder / "neb_opt.log").is_file():
                 optimizer = str(settings.get("optimizer", "FIRE"))
                 count, fmax = optimizer_progress(folder / "neb_opt.log", optimizer)
                 steps = f"{count}/{max_steps}"
-                phase = "plain" if count <= plain_steps else "climbing image"
-                progress = yellow(f"{phase} · fmax {fmax} eV/Å")
+                phase = neb_phase(ctx, material, pair, count, plain_steps)
+                progress = yellow(f"{phase['label']} · fmax {fmax} eV/Å")
             else:
                 progress = dim("waiting") if state in ("running", "pending") else dim("—")
             rows.append([f"{material} {pair.replace('_to_', ' → ')}", fmt(record.get("forward_barrier_eV")),
                          fmt(record.get("reverse_barrier_eV")), fmt(record.get("reaction_energy_eV")), steps, progress])
     table(columns, rows)
+
+
+def is_true(value: Any) -> bool:
+    """JSON booleans and their CSV spelling ('True')."""
+    return str(value).lower() == "true"
+
+
+def neb_flags(record: dict[str, Any]) -> list[str]:
+    """Compact notes on a finished pair: band endpoints, saddle, resolution, climb."""
+    notes = []
+    if is_true(record.get("endpoint_not_minimum")):
+        dips = [f"{name} dip {fmt(record.get(key), '.3f')}" for name, flag, key in
+                (("IS", "initial_not_minimum", "initial_dip_eV"), ("FS", "final_not_minimum", "final_dip_eV"))
+                if is_true(record.get(flag))]
+        notes.append(f"endpoint not a band minimum ({', '.join(dips)} eV)")
+    if is_true(record.get("no_internal_saddle")):
+        notes.append("no internal saddle")
+    elif not is_true(record.get("endpoint_not_minimum")) and str(record.get("barrier_resolved")).lower() == "false":
+        notes.append("barrier below resolution")
+    if is_true(record.get("climb_skipped")):
+        notes.append("climb skipped")
+    return notes
+
+
+NEB_PHASE_LABELS = {
+    "plain": "plain NEB",
+    "climbing_image": "climbing image",
+    "plain_continued": "plain NEB (climb skipped)",
+}
+
+
+def neb_phase(ctx: Context, material: str, pair: str, steps: int, plain_budget: int) -> dict[str, Any]:
+    """Phase of a running NEB pair from what run_neb wrote, not from the step budget.
+
+    Sources, in order: <pair>/neb_phase.json (written at every phase change), the
+    "[neb] Phase" lines of logs/neb.log after the "[neb] Start" line of the pair, and only
+    then the plain step budget (labelled as an estimate). Returns label, phase key, the
+    step at which the phase started (None if unknown) and the source.
+    """
+    marker = load_json(ctx.root / "neb" / material / pair / "neb_phase.json")
+    if marker.get("phase") in NEB_PHASE_LABELS:
+        start = as_float(marker.get("phase_start_step"))
+        return {"phase": marker["phase"], "label": NEB_PHASE_LABELS[marker["phase"]],
+                "start": None if start is None else int(start), "source": "phase file"}
+
+    initial, _, final = pair.partition("_to_")
+    start_line = f"material={material} | path={initial} -> {final}"
+    phase = None
+    start = None
+    for line in lines_starting(ctx.root / "logs" / "neb.log", ("[neb] Start", "[neb] Phase")):
+        if line.startswith("[neb] Start"):
+            phase = "plain" if line.endswith(start_line) else None
+            start = 0 if phase else None
+        elif phase is None:
+            continue
+        elif line.startswith("[neb] Phase 2: climbing image skipped"):
+            phase = "plain_continued"
+        elif line.startswith("[neb] Phase 2"):
+            phase = "climbing_image"
+        if phase and line.startswith("[neb] Phase 2"):
+            words = line.split()
+            start = int(words[words.index("after") + 1]) if "after" in words else None
+    if phase is not None:
+        return {"phase": phase, "label": NEB_PHASE_LABELS[phase], "start": start, "source": "neb.log"}
+
+    guess = "plain" if steps <= plain_budget else "climbing_image"
+    return {"phase": guess, "label": NEB_PHASE_LABELS[guess] + " (estimated)",
+            "start": None if guess == "plain" else plain_budget, "source": "step budget"}
 
 
 def neb_barriers(folder: Path, settings: dict[str, Any]) -> dict[str, Any]:
@@ -722,11 +793,18 @@ def print_live(ctx: Context) -> None:
         plain = round(max_steps * (as_float(settings.get("climb_start_fraction")) or 0.0))
         log = folder / "neb_opt.log"
         optimizer = str(settings.get("optimizer", "FIRE"))
-        if log.is_file():
+        if log.is_file() and len(rel) >= 3:
             steps = len(lines_starting(log, (f"{optimizer}:",)))
-            phase = "plain NEB" if steps <= plain else "climbing image"
-            target = float(settings.get("fmax_ev_per_angstrom" if steps <= plain else "fmax_ci_ev_per_angstrom", 0.05))
-            print(f"   stage      {phase} (plain phase ≤ {plain} steps, then CI; stops early when converged)")
+            phase = neb_phase(ctx, rel[1], rel[2], steps, plain)
+            key = "fmax_ev_per_angstrom" if phase["phase"] == "plain" else "fmax_ci_ev_per_angstrom"
+            target = float(settings.get(key, 0.05))
+            since = f" since step {phase['start']}" if phase["start"] else ""
+            note = {
+                "plain": f"plain phase ≤ {plain} steps; CI only if an internal image is above both endpoints",
+                "climbing_image": f"highest internal image{since}",
+                "plain_continued": f"no internal image above both endpoints{since}",
+            }[phase["phase"]]
+            print(f"   stage      {phase['label']} ({note}; from {phase['source']})")
             optimizer_live(ctx, log, optimizer, target, max_steps)
 
     if newest_txt is not None:

@@ -198,3 +198,111 @@ def test_frame_analysis_feeds_dataset_windows(tmp_path, slab, model):
     seed2 = windows[windows["seed"] == "2"]
     assert seed2["window_desorbed_fraction"].tolist() == [0.0, 1.0]
     assert (windows["window_site_analysis_coverage"] == 1.0).all()
+
+
+def test_md_defaults_mirror_run_md():
+    from scripts.simulations.md import run_md
+
+    for key in ("log_interval", "timestep_fs", "equilibration_steps", "production_steps"):
+        assert mta.MD_DEFAULTS[key] == run_md.DEFAULTS[key], key
+
+
+def test_co2_slab_distance_sees_the_oxygen_atoms(slab, model):
+    # Upright CO2 standing on one O: C is far from the slab, the lower O is not.
+    zn = slab.positions[model.metal_indices[0]]
+    atoms = adsorbed(slab, zn[:2], height=4.0)
+    carbon = atoms.positions[-2].copy()
+    atoms.positions[-3] = carbon + [0.0, 0.0, -1.16]
+    atoms.positions[-1] = carbon + [0.0, 0.0, 1.16]
+    result = mta.analyze_frame(atoms, model, "top_metal", 3.5)
+    assert result["c_min_slab_distance_ang"] == pytest.approx(4.0, abs=1e-6)
+    assert result["c_o_min_slab_distance_ang"] == pytest.approx(4.0 - 1.16, abs=1e-6)
+    assert result["desorbed"] == 1  # C-only, single frame: unchanged definition
+
+
+def test_persistent_mask_requires_consecutive_frames():
+    above = [0, 1, 1, 0, 1, 1, 1, 0, 1, 1]
+    assert mta.persistent_mask(above, 3).astype(int).tolist() == [0, 0, 0, 0, 1, 1, 1, 0, 0, 0]
+    assert mta.persistent_mask(above, 1).astype(int).tolist() == above
+    assert mta.persistent_mask([], 3).tolist() == []
+
+
+def trench_point(slab, model):
+    """Midway between the O of a dimer and the Zn of the next row (periodic image in y)."""
+    sites = model.sites(slab.positions)
+    zn = sites["top_metal"][0]
+    return (zn[0], 0.5 * (sites["top_oxygen"][0][1] + zn[1] + slab.cell[1, 1]))
+
+
+def test_site_assignment_marks_the_trench_as_other(slab, model):
+    zn = model.sites(slab.positions)["top_metal"][0]
+    trench = trench_point(slab, model)
+    result = mta.analyze_frame(adsorbed(slab, trench), model, "top_metal", 4.5)
+    assert result["nearest_site_lateral_ang"] > 1.0
+    assert result["nearest_site"] in mta.SITE_TYPES  # still forced to a type
+    assert result["site_assignment"] == "other"
+    near = mta.analyze_frame(adsorbed(slab, (zn[0] + 0.3, zn[1])), model, "top_metal", 4.5)
+    assert near["site_assignment"] == "top_metal"
+    wide = mta.analyze_frame(adsorbed(slab, trench), model, "top_metal", 4.5, site_radius=2.0)
+    assert wide["site_assignment"] == wide["nearest_site"]
+
+
+def test_new_columns_summary_and_sensitivity(tmp_path, slab, model):
+    zn = model.sites(slab.positions)["top_metal"][0]
+    trench = trench_point(slab, model)
+    seed_dir = tmp_path / "md" / "ZnO" / "top_metal" / "seed_1"
+    write_traj(seed_dir / "md_equilibration.traj", slab, [zn[:2]])
+    # Production: a one-frame spike to 4.8 A, back, three frames at 4.8 A, two at 5.5 A over the trench.
+    heights = [2.2, 4.8, 2.2, 4.8, 4.8, 4.8, 5.5, 5.5]
+    path_xy = [zn[:2]] * 6 + [trench] * 2
+    write_traj(seed_dir / "md_production.traj", slab, path_xy, heights=heights)
+    site_frames, summary = mta.analyze_run(tmp_path, "ZnO", model, settings(sites=["top_metal"]), 4.5)
+
+    frames = site_frames["top_metal"]
+    assert list(pd.read_csv(tmp_path / "md/ZnO/top_metal/md_frame_analysis.csv").columns) == mta.FRAME_COLUMNS
+    production = frames[frames["phase"] == "production"]
+    assert production["desorbed_persistent"].tolist() == [0, 0, 0, 1, 1, 1, 1, 1]
+    assert production["site_assignment"].tolist() == ["top_metal"] * 6 + ["other"] * 2
+    assert production["nearest_site"].iloc[-1] in mta.SITE_TYPES
+    row = summary.set_index(["site", "seed"]).loc[("top_metal", "1")]
+    assert row["fraction_production_other"] == pytest.approx(0.25)
+    assert row["fraction_production_desorbed_persistent"] == pytest.approx(5 / 8)
+    assert row["first_desorbed_persistent_fs"] == pytest.approx(60.0)
+    assert row["fraction_production_desorbed"] == pytest.approx(6 / 8)  # C-based single frame, as before
+
+    table = mta.desorption_sensitivity("ZnO", site_frames, [4.0, 4.5, 5.0], 3)
+    assert list(table.columns) == mta.SENSITIVITY_COLUMNS
+    by_threshold = table.set_index("threshold")
+    assert by_threshold.loc[4.5, "fraction_desorbed"] == pytest.approx(6 / 8)
+    assert by_threshold.loc[4.5, "fraction_desorbed_persistent"] == pytest.approx(5 / 8)
+    assert by_threshold.loc[5.0, "fraction_desorbed"] == pytest.approx(2 / 8)
+    assert by_threshold.loc[5.0, "fraction_desorbed_persistent"] == 0.0  # only 2 consecutive frames
+
+
+def test_missing_sites_and_not_started_seeds(tmp_path, slab, model, capsys):
+    zn = model.sites(slab.positions)["top_metal"][0]
+    md = tmp_path / "md" / "ZnO"
+    write_traj(md / "top_metal" / "seed_1" / "md_equilibration.traj", slab, [zn[:2]] * 2)
+    write_traj(md / "top_metal" / "seed_1" / "md_production.traj", slab, [zn[:2]] * 3)
+    not_started = md / "bridge" / "seed_1"
+    not_started.mkdir(parents=True)
+    (not_started / "md_equilibration.traj").write_bytes(b"")
+    (tmp_path / "config.yaml").write_text(
+        "selection:\n  sites: [top_metal, top_oxygen, bridge]\n"
+        "methods:\n  md:\n    log_interval: 20\n    timestep_fs: 1.0\n    production_steps: 40\n",
+        encoding="utf-8",
+    )
+    assert mta.main(["--results-dir", str(tmp_path), "--no-plot"]) == 0
+    assert "cannot open" not in capsys.readouterr().out
+    summary = pd.read_csv(tmp_path / mta.SUMMARY_FILENAME, dtype={"seed": str})
+    status = dict(zip(summary["site"], summary["status"]))
+    assert status == {"top_metal": "complete", "top_oxygen": "missing", "bridge": "not_started"}
+    sensitivity = pd.read_csv(tmp_path / mta.SENSITIVITY_FILENAME)
+    assert sorted(sensitivity["threshold"]) == [4.0, 4.5, 5.0]
+    assert (sensitivity["fraction_desorbed"] == 0.0).all()
+
+
+def test_configured_sites_fallbacks():
+    assert mta.configured_sites({}) == list(mta.SITE_TYPES)
+    assert mta.configured_sites({"selection": {"sites": ["bridge", "carbonate"]}}) == ["bridge"]
+    assert mta.configured_sites({"methods": {"dft": {"sites": ["top_oxygen"]}}}) == ["top_oxygen"]

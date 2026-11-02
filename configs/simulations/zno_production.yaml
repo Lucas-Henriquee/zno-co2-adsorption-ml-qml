@@ -55,17 +55,18 @@ methods:
   # It is not the optical response of ZnO-CO2; do not compare it with a
   # photocatalyst onset target. All energies are written in eV.
   tddft:
-    # Lowest transitions kept after diagonalisation (TRK uses all of them).
+    # Lowest transitions written to transitions.csv (descriptors and TRK use all of them).
     max_transitions: 50
-    # Onset = lowest transition with oscillator strength f >= threshold.
+    # First bright excitation = lowest transition with oscillator strength f >= threshold.
     oscillator_strength_threshold: 0.001
     grid_spacing_angstrom: 0.25
     box_size_angstrom: 18.0
     smearing_width_ev: 0.10
-    # CO2: 8 occupied bands + 60 unoccupied.
+    # The run uses nbands = max(68, converged + 8) = 76 bands: 68 converged (8 occupied
+    # + 60 unoccupied) plus 8 unconverged buffer bands, which jend keeps out of the basis.
     nbands: 68
     converged_bands: 68
-    # Maximal Kohn-Sham transition energy in the LrTDDFT basis.
+    # Maximal Kohn-Sham transition energy in the LrTDDFT basis (also limited by jend).
     energy_window_ev: 30.0
 
   co2rr:
@@ -86,9 +87,12 @@ methods:
       CO: 1.0
       H2: 1.0
       H2O: 0.035
-    # Additive corrections (eV) to G of gas-phase CO2 and CO for the PBE error.
-    # Kept at zero: literature values are functional- and setup-specific and must be
-    # verified for PBE/GPAW before use.
+    # Additive corrections (eV) to G of gas-phase CO2 and CO for the PBE error, applied
+    # during the run. Kept at zero here: the PBE gas-phase corrections (CO2 +0.19 eV,
+    # CO -0.24 eV; Granda-Marulanda et al., ACS Catal. 10, 6900 (2020)) are applied in
+    # post-processing by scripts/analysis/co2rr_corrections.py (variant c, the default
+    # downstream), which checks the corrected overall CO2 + 2(H+ + e-) -> CO + H2O
+    # against the experimental value (+0.20/+0.21 eV, liquid-water reference).
     gas_corrections_ev:
       CO2: 0.0
       CO: 0.0

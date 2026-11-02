@@ -54,17 +54,30 @@ def write_dft_summary(root: Path) -> None:
     pd.DataFrame(rows).to_csv(root / "dft_summary.csv", index=False)
 
 
-def write_tddft_summary(root: Path) -> None:
-    rows = [{
-        "material": "ZnO",
-        "site": site,
-        "tddft_status": "ok",
-        "co2_isolated_first_excitation_ev": 8.0 + index,
-        "co2_isolated_onset_ev": 8.1 + index,
-        "co2_isolated_peak_ev": 9.0 + index,
-        "co2_isolated_total_f": 0.5,
-        "trk_sum": 15.0,
-    } for index, site in enumerate(SITES)]
+def write_tddft_summary(root: Path, legacy: bool = False) -> None:
+    """Current tddft_summary.csv columns, or (legacy=True) the pre-rename ones."""
+    rows = []
+    for index, site in enumerate(SITES):
+        row = {
+            "material": "ZnO",
+            "site": site,
+            "tddft_status": "ok",
+            "co2_isolated_first_excitation_ev": 8.0 + index,
+            "co2_isolated_peak_ev": 9.0 + index,
+            "trk_sum": 15.0,
+        }
+        if legacy:
+            row.update({"co2_isolated_onset_ev": 8.1 + index, "co2_isolated_total_f": 0.5})
+        else:
+            row.update({
+                "co2_isolated_first_excitation_f": 1.0e-4,
+                "co2_isolated_first_bright_excitation_ev": 8.1 + index,
+                "co2_isolated_peak_f": 0.4,
+                "co2_isolated_ks_ionization_threshold_ev": 9.5,
+                "co2_isolated_first_bright_above_ks_threshold": 0.0,
+                "trk_fraction": 15.0 / 16.0,
+            })
+        rows.append(row)
     pd.DataFrame(rows).to_csv(root / "tddft_summary.csv", index=False)
 
 
@@ -130,7 +143,9 @@ class DatasetTests(unittest.TestCase):
         top_oxygen = summary.set_index("site").loc["top_oxygen"]
         # Gamma-grid PBE gaps (1.2 - 1.0), not the mesh gaps (3.5 - 3.0).
         self.assertAlmostEqual(top_oxygen["feature_dft_pbe_gap_change_ev"], 0.2)
-        self.assertAlmostEqual(top_oxygen["tddft_co2_isolated_onset_ev"], 9.1)
+        self.assertAlmostEqual(top_oxygen["tddft_co2_isolated_first_bright_excitation_ev"], 9.1)
+        self.assertAlmostEqual(top_oxygen["tddft_co2_isolated_ks_ionization_threshold_ev"], 9.5)
+        self.assertFalse([col for col in summary.columns if "onset" in col or "total_f" in col])
         self.assertEqual(int(top_oxygen["md_n_trajectories"]), len(SEEDS))
         self.assertTrue(summary["group"].is_unique)
         bridge = summary.set_index("site").loc["bridge"]
@@ -232,7 +247,7 @@ class DatasetTests(unittest.TestCase):
             columns = pd.read_csv(out / f"{name}.csv", nrows=0).columns
             self.assertFalse([col for col in columns if col.startswith("feature_tddft")], name)
         summary = pd.read_csv(out / "multitech_selected_features_dataset.csv")
-        self.assertIn("tddft_co2_isolated_onset_ev", summary.columns)  # reference column only
+        self.assertIn("tddft_co2_isolated_first_bright_excitation_ev", summary.columns)  # reference column only
         windows = pd.read_csv(out / "md_window_unique_dataset.csv", nrows=0)
         self.assertFalse([col for col in windows.columns if "tddft" in col])
 
@@ -293,6 +308,12 @@ class TDDFTDatasetTests(unittest.TestCase):
         self.assertEqual(sorted(built["group"]), sorted(f"ZnO/{site}" for site in SITES))
         self.assertEqual(transitions.groupby("group").size().tolist(), [2, 2, 2])
         self.assertTrue((transitions["group"] == "ZnO/" + transitions["site"]).all())
+        for table in (built, transitions):
+            self.assertFalse([col for col in table.columns if col.startswith(("feature_", "label"))])
+        self.assertAlmostEqual(built.set_index("site").loc["top_oxygen", "co2_isolated_first_bright_excitation_ev"], 9.1)
+        np.testing.assert_allclose(
+            transitions["delta_from_peak_ev"], transitions["energy_ev"] - transitions["site"].map(
+                {site: 9.0 + index for index, site in enumerate(SITES)}))
         output = " ".join(str(call.args[0]) for call in printed.call_args_list if call.args)
         self.assertIn("not suitable for site classification", output)
         self.assertIn("NOT suitable", td.__doc__)
@@ -325,7 +346,23 @@ class ScreeningTests(unittest.TestCase):
         energies = [row["adsorption_energy_ev"] for row in ranked]
         self.assertEqual(energies, sorted(energies))
         self.assertTrue(all(row["clean_band_gap_gamma_ev"] == 1.0 for row in ranked))
-        self.assertIn("co2_isolated_onset_ev", ranked[0])
+        self.assertIn("co2_isolated_first_bright_excitation_ev", ranked[0])
+        self.assertNotIn("co2_isolated_onset_ev", ranked[0])
+        self.assertNotIn("co2_isolated_total_f", ranked[0])
+
+    def test_legacy_tddft_columns_are_read_through_alias(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_dft_summary(root)
+            write_tddft_summary(root, legacy=True)
+            dft = analyze_results.read_csv_rows(root / "dft_summary.csv")
+            tddft = analyze_results.read_csv_rows(root / "tddft_summary.csv")
+            ranked = {row["site"]: row for row in analyze_results.merge_results(dft, tddft)}
+            multitech = pm.load_tddft_summary(root).set_index("site")
+        self.assertAlmostEqual(ranked["top_oxygen"]["co2_isolated_first_bright_excitation_ev"], 9.1)
+        self.assertTrue(math.isnan(ranked["top_oxygen"]["co2_isolated_ks_ionization_threshold_ev"]))
+        self.assertAlmostEqual(multitech.loc["top_oxygen", "tddft_co2_isolated_first_bright_excitation_ev"], 9.1)
+        self.assertTrue(np.isnan(multitech.loc["top_oxygen", "tddft_co2_isolated_peak_f"]))
 
 
 class QMLExportTests(unittest.TestCase):

@@ -14,7 +14,11 @@ Inputs (below --results-dir, one simulation run):
   complete frame; missing seeds or phases are reported and skipped.
 * ``config.yaml`` of the run (``methods.md``): ``log_interval``, ``timestep_fs``,
   ``equilibration_steps``, ``production_steps`` and ``seeds``; command-line
-  options override it.
+  options override it. The sites to report come from ``selection.sites`` of
+  the same file (then ``methods.md.sites`` / ``methods.dft.sites``), else
+  project_config.ADSORPTION_SITES; a configured site or seed without a
+  directory is listed in the summary as ``missing``, and a seed directory whose
+  ``md_equilibration.traj`` is still empty (0 bytes) as ``not_started``.
 
 Per frame, with the minimum-image convention in the surface plane:
 
@@ -23,17 +27,40 @@ Per frame, with the minimum-image convention in the surface plane:
   of the C atom. The sites follow the frame: top_metal / top_oxygen are the
   current xy positions of the outermost-plane Zn / O atoms and bridge is the
   midpoint of each surface Zn-O dimer (the Zn and its nearest outermost-plane O).
+  ``nearest_site_lateral_ang`` is the lateral distance to that site.
+  ``nearest_site`` is always one of the three types, even when CO2 sits over the
+  trench between two dimer rows.
+* ``site_assignment``: ``nearest_site`` when ``nearest_site_lateral_ang`` <=
+  ``--site-radius`` (default 1.0 A), otherwise ``other``. 1.0 A is half the
+  1.99 A lateral length of the surface Zn-O dimer (top_metal to top_oxygen;
+  bridge is its midpoint, 1.0 A from both). Within a dimer the nearest-site
+  rule decides; the radius only bounds the dimer region, so the trench
+  between dimer rows (about 1.6 A from the nearest site in the ideal 2x1
+  slab) and the gap between neighbouring dimers of a row (about 1.6 A from
+  the bridge) fall into ``other``.
 * ``start_site_lateral_ang``: lateral distance to the nearest site of the
   starting type.
 * ``c_height_top_plane_ang``: z of C minus the mean z of the OUTERMOST plane
-  only. The plane atoms are taken from a reference clean slab (atoms within
-  0.3 A of its highest z; by default the ideal slab of build_geometries, from
-  which every DFT start was built). run_md.py reports
-  ``c_height_above_slab_plane_ang`` against a 1.0 A window that also takes the
-  second plane (0.94 A lower), which biases that height by about +0.47 A; this
-  column is the corrected value. run_md.py itself is not changed.
+  only. This is the reference surface height of the project. The plane atoms
+  are taken from a reference clean slab (atoms within 0.3 A of its highest z;
+  by default the ideal slab of build_geometries, from which every DFT start
+  was built). run_md.py reports ``c_height_above_slab_plane_ang`` against a
+  1.0 A window, which in the ideal slab also captures the second plane
+  (measured 0.938 A below the outermost one); its mean plane is 0.47 A low and
+  that height about +0.47 A too large, so that run_md column is not used. run_md.py itself is not changed.
 * ``c_min_slab_distance_ang``: minimum-image C-slab distance; ``desorbed`` = 1
-  when it exceeds ``--desorption-threshold``.
+  when it exceeds ``--desorption-threshold`` in that single frame (C only;
+  unchanged definition, kept for compatibility with the dataset code).
+* ``c_o_min_slab_distance_ang``: minimum-image distance from ANY CO2 atom (O, C,
+  O: the last three atoms) to any slab atom. A molecule standing on one O has
+  a large C-slab distance while still touching the surface; this column does
+  not have that problem.
+* ``desorbed_persistent``: 1 when ``c_o_min_slab_distance_ang`` exceeds
+  ``--desorption-threshold`` in this frame AND the frame belongs to a run of at
+  least ``--desorption-persistence-frames`` consecutive logged frames of the
+  same phase above it (default 3 = 60 fs at 20-step logging and 1 fs, so that
+  a single thermal excursion does not count). A run still open at the end of a
+  partial trajectory counts only once it reaches that length.
 * ``msd_lateral_ang2``: squared lateral displacement of C from the first
   production frame (positions unwrapped frame to frame). It is a single-trajectory
   quantity, not an ensemble average; NaN during equilibration.
@@ -41,7 +68,18 @@ Per frame, with the minimum-image convention in the surface plane:
 Outputs:
 
 * ``md/<material>/<site>/md_frame_analysis.csv``: one row per frame and seed.
-* ``md_trajectory_analysis_summary.csv`` (run level): one row per trajectory.
+* ``md_trajectory_analysis_summary.csv`` (run level): one row per trajectory
+  (configured sites/seeds without data included as ``missing`` / ``not_started``).
+  ``fraction_production_other`` is the fraction of production frames whose
+  ``site_assignment`` is ``other``.
+* ``md_desorption_sensitivity.csv`` (run level): for each trajectory and each
+  ``--desorption-thresholds`` value (default 4.0 4.5 5.0 A), the fraction of
+  production frames with ``c_o_min_slab_distance_ang`` above the threshold
+  (``fraction_desorbed``, single frame) and the persistent fraction
+  (``fraction_desorbed_persistent``). The 4.5 A default has no
+  first-principles justification (about twice the ~2.2 A start height, well
+  beyond any C/O-surface contact); the table shows how much the conclusions
+  depend on it.
 * ``md/<material>/md_nearest_site_occupancy.png`` (optional): nearest site
   against time, one panel per trajectory.
 """
@@ -57,6 +95,14 @@ import pandas as pd
 from scripts.common import project_config
 
 DEFAULT_DESORPTION_THRESHOLD_ANG = 4.5
+DEFAULT_DESORPTION_THRESHOLDS_ANG = (4.0, 4.5, 5.0)
+# Consecutive logged frames above the threshold for a persistent desorption
+# (3 frames = 60 fs at log_interval 20 and 1 fs).
+DEFAULT_DESORPTION_PERSISTENCE_FRAMES = 3
+# Lateral radius (A) within which CO2 is assigned to its nearest site: half the
+# 1.99 A lateral Zn-O length of the surface dimer (see the module docstring).
+DEFAULT_SITE_RADIUS_ANG = 1.0
+OTHER_SITE = "other"
 # Outermost plane: atoms within this distance of the highest slab atom of the
 # reference slab. On ZnO(10-10) the second plane lies 0.94 A lower.
 TOP_PLANE_WINDOW_ANG = 0.3
@@ -69,15 +115,17 @@ TRAJECTORY_FILES = {
 }
 FRAME_ANALYSIS_FILENAME = "md_frame_analysis.csv"
 SUMMARY_FILENAME = "md_trajectory_analysis_summary.csv"
+SENSITIVITY_FILENAME = "md_desorption_sensitivity.csv"
 PLOT_FILENAME = "md_nearest_site_occupancy.png"
 SURFACE_PBC = (True, True, False)
 
-# Fallbacks when the run has no config.yaml (they mirror run_md.DEFAULTS).
+# Fallbacks when the run has no config.yaml (they mirror run_md.DEFAULTS and
+# methods.md of configs/simulations/zno_production.yaml).
 MD_DEFAULTS = {
     "log_interval": 20,
     "timestep_fs": 1.0,
-    "equilibration_steps": 1000,
-    "production_steps": 2000,
+    "equilibration_steps": 500,
+    "production_steps": 1500,
 }
 
 FRAME_COLUMNS = [
@@ -93,6 +141,9 @@ FRAME_COLUMNS = [
     "c_min_slab_distance_ang",
     "desorbed",
     "msd_lateral_ang2",
+    "c_o_min_slab_distance_ang",
+    "desorbed_persistent",
+    "site_assignment",
 ]
 
 SUMMARY_COLUMNS = [
@@ -114,6 +165,19 @@ SUMMARY_COLUMNS = [
     "mean_c_height_top_plane_ang",
     "mean_c_min_slab_distance_ang",
     "mean_start_site_lateral_ang",
+    "fraction_production_other",
+    "fraction_production_desorbed_persistent",
+    "first_desorbed_persistent_fs",
+    "mean_c_o_min_slab_distance_ang",
+]
+
+SENSITIVITY_COLUMNS = [
+    "material",
+    "site",
+    "seed",
+    "threshold",
+    "fraction_desorbed",
+    "fraction_desorbed_persistent",
 ]
 
 
@@ -132,7 +196,35 @@ def parse_args(argv=None) -> argparse.Namespace:
         "--desorption-threshold",
         type=float,
         default=DEFAULT_DESORPTION_THRESHOLD_ANG,
-        help="C-slab minimum distance (A) above which a frame counts as desorbed.",
+        help=(
+            "Distance (A) above which a frame counts as desorbed: C-slab for `desorbed`, any "
+            "CO2 atom-slab for `desorbed_persistent` (default 4.5)."
+        ),
+    )
+    parser.add_argument(
+        "--desorption-persistence-frames",
+        type=int,
+        default=DEFAULT_DESORPTION_PERSISTENCE_FRAMES,
+        help=(
+            "Consecutive logged frames above the threshold for `desorbed_persistent` "
+            "(default 3 = 60 fs at 20-step logging and 1 fs)."
+        ),
+    )
+    parser.add_argument(
+        "--desorption-thresholds",
+        type=float,
+        nargs="+",
+        default=list(DEFAULT_DESORPTION_THRESHOLDS_ANG),
+        help="Thresholds (A) of the sensitivity table md_desorption_sensitivity.csv (default 4.0 4.5 5.0).",
+    )
+    parser.add_argument(
+        "--site-radius",
+        type=float,
+        default=DEFAULT_SITE_RADIUS_ANG,
+        help=(
+            "Lateral distance (A) within which CO2 is assigned to its nearest site; beyond it "
+            "site_assignment is 'other' (default 1.0, half the 1.99 A lateral Zn-O dimer length)."
+        ),
     )
     parser.add_argument(
         "--log-interval",
@@ -183,8 +275,9 @@ def parse_args(argv=None) -> argparse.Namespace:
 
 
 def load_md_settings(results_dir: Path, config_path: Path | None, args: argparse.Namespace) -> dict:
-    """Return log_interval, timestep_fs, production_steps and seeds (CLI > config > defaults)."""
+    """Return log_interval, timestep_fs, production_steps, seeds and sites (CLI > config > defaults)."""
     md: dict = {}
+    payload: dict = {}
     path = config_path if config_path is not None else results_dir / "config.yaml"
     if path.is_file():
         import yaml
@@ -210,6 +303,7 @@ def load_md_settings(results_dir: Path, config_path: Path | None, args: argparse
     if production is None:
         production = md.get("production_steps", md.get("steps"))
     settings = {
+        "sites": configured_sites(payload),
         "log_interval": pick(args.log_interval, "log_interval", int),
         "timestep_fs": pick(args.timestep_fs, "timestep_fs", float),
         "production_steps": int(production) if production is not None else MD_DEFAULTS["production_steps"],
@@ -218,6 +312,24 @@ def load_md_settings(results_dir: Path, config_path: Path | None, args: argparse
     if settings["log_interval"] <= 0 or settings["timestep_fs"] <= 0:
         raise SystemExit("[md-analysis] log_interval and timestep_fs must be positive.")
     return settings
+
+
+def configured_sites(payload: dict) -> list[str]:
+    """MD sites of the run: selection.sites, methods.md.sites, methods.dft.sites, else ADSORPTION_SITES.
+
+    Only the MD site types (SITE_TYPES) are kept: exploratory DFT starts have no MD.
+    """
+    methods = payload.get("methods") or {}
+    for candidate in (
+        (payload.get("selection") or {}).get("sites"),
+        (methods.get("md") or {}).get("sites"),
+        (methods.get("dft") or {}).get("sites"),
+    ):
+        if candidate:
+            sites = [str(site) for site in candidate if str(site) in SITE_TYPES]
+            if sites:
+                return list(dict.fromkeys(sites))
+    return [site for site in project_config.ADSORPTION_SITES if site in SITE_TYPES]
 
 
 # --------------------------------------------------------------------- geometry
@@ -298,7 +410,13 @@ class SiteModel:
         return float(np.mean(positions[self.top_indices, 2]))
 
 
-def analyze_frame(atoms, model: SiteModel, start_site: str, threshold: float) -> dict:
+def analyze_frame(
+    atoms,
+    model: SiteModel,
+    start_site: str,
+    threshold: float,
+    site_radius: float = DEFAULT_SITE_RADIUS_ANG,
+) -> dict:
     from ase.geometry import get_distances
 
     positions = atoms.get_positions()
@@ -312,6 +430,10 @@ def analyze_frame(atoms, model: SiteModel, start_site: str, threshold: float) ->
         carbon[None, :], positions[: model.n_slab], cell=model.cell, pbc=SURFACE_PBC
     )
     c_min = float(slab_distances.min())
+    _, co2_distances = get_distances(
+        positions[model.n_slab:], positions[: model.n_slab], cell=model.cell, pbc=SURFACE_PBC
+    )
+    lateral = site_distances[nearest]
     return {
         "nearest_site": nearest,
         "nearest_site_lateral_ang": site_distances[nearest],
@@ -319,6 +441,8 @@ def analyze_frame(atoms, model: SiteModel, start_site: str, threshold: float) ->
         "c_height_top_plane_ang": float(carbon[2]) - model.plane_z(positions),
         "c_min_slab_distance_ang": c_min,
         "desorbed": int(c_min > threshold),
+        "c_o_min_slab_distance_ang": float(co2_distances.min()),
+        "site_assignment": nearest if lateral <= site_radius else OTHER_SITE,
         "_carbon_xyz": carbon,
     }
 
@@ -344,7 +468,7 @@ def read_frames(path: Path) -> list:
     A trajectory still being written may end with an incomplete frame: reading
     stops there, the frames before it are kept.
     """
-    if not path.is_file():
+    if not path.is_file() or path.stat().st_size == 0:  # 0 bytes: created, nothing written yet
         return []
     from ase.io.trajectory import Trajectory
 
@@ -366,6 +490,29 @@ def read_frames(path: Path) -> list:
     return frames
 
 
+def persistent_mask(above, min_frames: int) -> np.ndarray:
+    """True for frames inside a run of >= ``min_frames`` consecutive True values."""
+    above = np.asarray(above, dtype=bool)
+    mask = np.zeros(len(above), dtype=bool)
+    start = None
+    for index, value in enumerate(np.append(above, False)):
+        if value and start is None:
+            start = index
+        elif not value and start is not None:
+            if index - start >= min_frames:
+                mask[start:index] = True
+            start = None
+    return mask
+
+
+def trajectory_not_started(seed_dir: Path) -> bool:
+    """The seed directory exists, md_equilibration.traj is empty (0 bytes) and there is no production data."""
+    equilibration = seed_dir / TRAJECTORY_FILES["equilibration"]
+    production = seed_dir / TRAJECTORY_FILES["production"]
+    production_empty = not production.is_file() or production.stat().st_size == 0
+    return equilibration.is_file() and equilibration.stat().st_size == 0 and production_empty
+
+
 def analyze_trajectory(
     seed_dir: Path,
     seed: str,
@@ -374,6 +521,8 @@ def analyze_trajectory(
     threshold: float,
     log_interval: int,
     timestep_fs: float,
+    persistence_frames: int = DEFAULT_DESORPTION_PERSISTENCE_FRAMES,
+    site_radius: float = DEFAULT_SITE_RADIUS_ANG,
 ) -> pd.DataFrame:
     """Frame table of one seed (equilibration then production)."""
     rows = []
@@ -387,7 +536,7 @@ def analyze_trajectory(
         previous = None
         for index, atoms in enumerate(frames):
             model.check_frame(atoms)
-            data = analyze_frame(atoms, model, start_site, threshold)
+            data = analyze_frame(atoms, model, start_site, threshold, site_radius)
             carbon = data.pop("_carbon_xyz")
             msd = float("nan")
             if phase == "production":
@@ -408,7 +557,14 @@ def analyze_trajectory(
                 **data,
                 "msd_lateral_ang2": msd,
             })
-    return pd.DataFrame(rows, columns=FRAME_COLUMNS)
+    table = pd.DataFrame(rows, columns=FRAME_COLUMNS)
+    persistent = np.zeros(len(table), dtype=int)
+    for phase in PHASES:
+        selected = (table["phase"] == phase).to_numpy()
+        above = table.loc[selected, "c_o_min_slab_distance_ang"].to_numpy(dtype=float) > threshold
+        persistent[selected] = persistent_mask(above, persistence_frames).astype(int)
+    table["desorbed_persistent"] = persistent
+    return table
 
 
 def _seed_key(name: str) -> tuple[int, str]:
@@ -455,6 +611,7 @@ def summarize_trajectory(
     if n_production == 0:
         row["status"] = "no_production" if len(frames) else "missing"
         return row
+    persistent = production["desorbed_persistent"].astype(int) == 1
     complete = expected_production_frames is not None and n_production >= expected_production_frames
     row["status"] = "complete" if complete else "partial"
     at_start = production["nearest_site"] == site
@@ -476,8 +633,41 @@ def summarize_trajectory(
         "mean_c_height_top_plane_ang": float(production["c_height_top_plane_ang"].mean()),
         "mean_c_min_slab_distance_ang": float(production["c_min_slab_distance_ang"].mean()),
         "mean_start_site_lateral_ang": float(production["start_site_lateral_ang"].mean()),
+        "fraction_production_other": float((production["site_assignment"] == OTHER_SITE).mean()),
+        "fraction_production_desorbed_persistent": float(persistent.mean()),
+        "first_desorbed_persistent_fs": (
+            float(production.loc[persistent, "time_fs"].iloc[0]) if persistent.any() else float("nan")
+        ),
+        "mean_c_o_min_slab_distance_ang": float(production["c_o_min_slab_distance_ang"].mean()),
     })
     return row
+
+
+def desorption_sensitivity(
+    material: str,
+    site_frames: dict[str, pd.DataFrame],
+    thresholds,
+    persistence_frames: int = DEFAULT_DESORPTION_PERSISTENCE_FRAMES,
+) -> pd.DataFrame:
+    """Production desorption fractions (any CO2 atom-slab distance) of every trajectory per threshold."""
+    rows = []
+    for site, table in site_frames.items():
+        for seed, frames in table.groupby("seed", sort=False):
+            production = frames[frames["phase"] == "production"]
+            if production.empty:
+                continue
+            distance = production["c_o_min_slab_distance_ang"].to_numpy(dtype=float)
+            for threshold in thresholds:
+                above = distance > float(threshold)
+                rows.append({
+                    "material": material,
+                    "site": site,
+                    "seed": str(seed),
+                    "threshold": float(threshold),
+                    "fraction_desorbed": float(above.mean()),
+                    "fraction_desorbed_persistent": float(persistent_mask(above, persistence_frames).mean()),
+                })
+    return pd.DataFrame(rows, columns=SENSITIVITY_COLUMNS)
 
 
 def analyze_run(
@@ -486,11 +676,17 @@ def analyze_run(
     model: SiteModel,
     settings: dict,
     threshold: float = DEFAULT_DESORPTION_THRESHOLD_ANG,
+    persistence_frames: int = DEFAULT_DESORPTION_PERSISTENCE_FRAMES,
+    site_radius: float = DEFAULT_SITE_RADIUS_ANG,
 ) -> tuple[dict[str, pd.DataFrame], pd.DataFrame]:
     """Analyse every seed of every site; write md_frame_analysis.csv per site.
 
-    Returns ({site: frame table}, summary table). Seeds listed in the run
-    configuration without a trajectory appear in the summary as ``missing``.
+    Returns ({site: frame table}, summary table). Every configured site
+    (``settings["sites"]``, default project_config.ADSORPTION_SITES) appears in
+    the summary: configured seeds without a directory as ``missing`` (a site
+    without any directory and no configured seeds as one ``missing`` row with
+    an empty seed); a seed whose md_equilibration.traj is still empty (0 bytes)
+    as ``not_started``.
     """
     log_interval = settings["log_interval"]
     production_steps = settings.get("production_steps")
@@ -500,17 +696,33 @@ def analyze_run(
     discovered = discover_trajectories(results_dir, material)
     if not discovered:
         print(f"[md-analysis] no seed_<n>/ trajectories below {results_dir / 'md' / material}")
-    for site, seeds in discovered.items():
+    configured = settings.get("sites")
+    if configured is None:
+        configured = [site for site in project_config.ADSORPTION_SITES if site in SITE_TYPES]
+    all_sites = [site for site in SITE_TYPES if site in discovered or site in configured]
+    empty = pd.DataFrame(columns=FRAME_COLUMNS)
+    for site in all_sites:
+        seeds = discovered.get(site, [])
         tables = []
         present = {seed for seed, _ in seeds}
+        if not seeds and not settings.get("seeds"):
+            summary_rows.append(summarize_trajectory(material, site, "", empty, expected))
+            print(f"[md-analysis] {material}/{site}: no trajectories yet (missing).")
         for seed, seed_dir in seeds:
+            if trajectory_not_started(seed_dir):
+                row = summarize_trajectory(material, site, seed, empty, expected)
+                row["status"] = "not_started"
+                summary_rows.append(row)
+                print(f"[md-analysis] {material}/{site}/seed_{seed}: not started (empty trajectory).")
+                continue
             try:
                 frames = analyze_trajectory(
-                    seed_dir, seed, model, site, threshold, log_interval, settings["timestep_fs"]
+                    seed_dir, seed, model, site, threshold, log_interval, settings["timestep_fs"],
+                    persistence_frames, site_radius,
                 )
             except ValueError as exc:
                 print(f"[md-analysis] {material}/{site}/seed_{seed}: skipped ({exc})")
-                row = summarize_trajectory(material, site, seed, pd.DataFrame(columns=FRAME_COLUMNS), expected)
+                row = summarize_trajectory(material, site, seed, empty, expected)
                 row["status"] = "error"
                 summary_rows.append(row)
                 continue
@@ -524,13 +736,13 @@ def analyze_run(
                 f"[md-analysis] {material}/{site}/seed_{seed}: {last['n_equilibration_frames']} eq + "
                 f"{last['n_production_frames']} production frames ({last['status']}); "
                 f"at start site {last['fraction_production_at_start_site']:.2f}, "
-                f"desorbed {last['fraction_production_desorbed']:.2f}"
+                f"desorbed {last['fraction_production_desorbed']:.2f} "
+                f"(persistent {last['fraction_production_desorbed_persistent']:.2f}), "
+                f"other {last['fraction_production_other']:.2f}"
             )
         for seed in settings.get("seeds", []):
             if seed not in present:
-                summary_rows.append(
-                    summarize_trajectory(material, site, seed, pd.DataFrame(columns=FRAME_COLUMNS), expected)
-                )
+                summary_rows.append(summarize_trajectory(material, site, seed, empty, expected))
                 print(f"[md-analysis] {material}/{site}/seed_{seed}: not found (missing).")
         if tables:
             table = pd.concat(tables, ignore_index=True)
@@ -603,6 +815,12 @@ def main(argv=None) -> int:
         raise SystemExit(f"[md-analysis] Results directory not found: {results_dir}")
     if args.desorption_threshold <= 0:
         raise SystemExit("[md-analysis] --desorption-threshold must be positive.")
+    if args.desorption_persistence_frames < 1:
+        raise SystemExit("[md-analysis] --desorption-persistence-frames must be >= 1.")
+    if any(value <= 0 for value in args.desorption_thresholds):
+        raise SystemExit("[md-analysis] --desorption-thresholds must be positive.")
+    if args.site_radius <= 0:
+        raise SystemExit("[md-analysis] --site-radius must be positive.")
     output_dir = (args.output_dir or results_dir).expanduser().resolve()
     settings = load_md_settings(results_dir, args.config, args)
     metal_symbol = project_config.MATERIALS[args.material].metal_symbol
@@ -613,15 +831,23 @@ def main(argv=None) -> int:
     print(
         f"[md-analysis] top plane atoms {model.top_indices}; bridge pairs {model.bridge_pairs}; "
         f"log_interval={settings['log_interval']} timestep={settings['timestep_fs']} fs; "
-        f"desorption threshold {args.desorption_threshold} A"
+        f"desorption threshold {args.desorption_threshold} A "
+        f"(persistent: {args.desorption_persistence_frames} frames); site radius {args.site_radius} A"
     )
     site_frames, summary = analyze_run(
-        results_dir, args.material, model, settings, args.desorption_threshold
+        results_dir, args.material, model, settings, args.desorption_threshold,
+        args.desorption_persistence_frames, args.site_radius,
     )
     output_dir.mkdir(parents=True, exist_ok=True)
     summary_path = output_dir / SUMMARY_FILENAME
     summary.to_csv(summary_path, index=False)
     print(f"[md-analysis] wrote {summary_path} ({len(summary)} trajectories)")
+    sensitivity = desorption_sensitivity(
+        args.material, site_frames, args.desorption_thresholds, args.desorption_persistence_frames
+    )
+    sensitivity_path = output_dir / SENSITIVITY_FILENAME
+    sensitivity.to_csv(sensitivity_path, index=False)
+    print(f"[md-analysis] wrote {sensitivity_path} ({len(sensitivity)} rows)")
     if not args.no_plot:
         plot_occupancy(
             site_frames,

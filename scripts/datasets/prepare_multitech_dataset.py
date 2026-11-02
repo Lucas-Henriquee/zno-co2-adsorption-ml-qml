@@ -6,7 +6,7 @@ No row is duplicated by a join (audit findings D1 and M3):
   successful DFT calculation (material, site). The other methods are joined one to
   one; nothing is multiplied. It is a descriptor table, too small for classification.
   The TDDFT descriptors of the isolated CO2 molecule are kept there only as
-  ``tddft_co2_isolated_*`` reference columns, NOT as ``feature_*`` columns: the
+  ``tddft_*`` reference columns, NOT as ``feature_*`` columns: the
   physisorbed CO2 has nearly the same geometry on every site, so they carry no site
   information.
 * ``md_window_unique_dataset.csv`` (target ``md_windows``): one row per block of
@@ -48,6 +48,7 @@ import pandas as pd
 
 from scripts.common.md_inputs import find_md_summaries
 from scripts.common.project_config import EXPLORATORY_SITES, RESULTS_DIR
+from scripts.simulations.tddft.run_tddft import LEGACY_COLUMN_ALIASES
 
 # Legacy option: now the maximum number of blocks per trajectory (0 = no cap).
 DEFAULT_MD_WINDOWS_PER_SITE = 10
@@ -91,10 +92,14 @@ MD_WINDOW_STD_FEATURE = "feature_md_window_c_surface_distance_std_a"
 # features (no ``feature_`` prefix), and never enter the MD datasets.
 TDDFT_COLUMNS = {
     "co2_isolated_first_excitation_ev": "tddft_co2_isolated_first_excitation_ev",
-    "co2_isolated_onset_ev": "tddft_co2_isolated_onset_ev",
+    "co2_isolated_first_bright_excitation_ev": "tddft_co2_isolated_first_bright_excitation_ev",
     "co2_isolated_peak_ev": "tddft_co2_isolated_peak_ev",
-    "co2_isolated_total_f": "tddft_co2_isolated_total_f",
+    "co2_isolated_peak_f": "tddft_co2_isolated_peak_f",
+    "co2_isolated_ks_ionization_threshold_ev": "tddft_co2_isolated_ks_ionization_threshold_ev",
+    "trk_sum": "tddft_trk_sum",
 }
+# Present in every tddft_summary.csv version (after LEGACY_COLUMN_ALIASES); the others are NaN when absent.
+TDDFT_REQUIRED = ("co2_isolated_first_excitation_ev", "co2_isolated_first_bright_excitation_ev", "co2_isolated_peak_ev")
 
 # Per-frame site analysis written by scripts/analysis/md_trajectory_analysis.py.
 FRAME_ANALYSIS_FILENAME = "md_frame_analysis.csv"
@@ -368,7 +373,11 @@ def load_tddft_summary(results_dir: Path) -> pd.DataFrame | None:
         print(f"[dataset] No TDDFT summary at {path}; TDDFT descriptors omitted.")
         return None
     df = pd.read_csv(path)
-    require_columns(df, ["material", "site", *TDDFT_COLUMNS], "TDDFT summary")
+    df = df.rename(columns={old: new for old, new in LEGACY_COLUMN_ALIASES.items() if new not in df.columns})
+    require_columns(df, ["material", "site", *TDDFT_REQUIRED], "TDDFT summary")
+    for column in TDDFT_COLUMNS:
+        if column not in df.columns:
+            df[column] = float("nan")
     df = drop_excluded_sites(keep_ok(df, "tddft_status"))
     df = numeric(df, list(TDDFT_COLUMNS))
 

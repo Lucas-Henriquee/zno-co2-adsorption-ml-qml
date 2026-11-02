@@ -1,5 +1,6 @@
 """Pathway plumbing with an EMT stand-in for GPAW: spin moments, geometry, checkpoint reuse."""
 
+import math
 from argparse import Namespace
 
 import numpy as np
@@ -180,6 +181,7 @@ def test_site_row_end_to_end_with_emt(tmp_path, monkeypatch, emt):
         "material": "Cu", "site": "top_metal", "dft_status": "ok", "dft_profile": "base",
         "clean_slab_energy_ev": "0.5", "adsorbed_energy_ev": "1.0",
         "clean_fmax_final_ev_per_ang": "0.01", "adsorbed_fmax_final_ev_per_ang": "0.02",
+        "ecut_ev": "500.0", "kpts": "2x3x1",
     }
     args = Namespace(ecut=500.0, kpts=(2, 3, 1), fmax=0.05, steps=300, molecule_box_vacuum=5.0, overwrite=False)
     settings = {k: (dict(v) if isinstance(v, dict) else v) for k, v in co2rr.DEFAULT_THERMO_SETTINGS.items()}
@@ -192,7 +194,14 @@ def test_site_row_end_to_end_with_emt(tmp_path, monkeypatch, emt):
     assert row["E_clean_slab_ev"] == 0.5 and row["E_CO2_star_ev"] == 1.0
     steps = [row[f"dG_{s}_ev"] for s in co2rr.PATHWAY_STEPS]
     assert sum(steps) == pytest.approx(row["dG_overall_ev"])
-    assert row["limiting_potential_v"] == pytest.approx(-max(steps[:2]))
+    assert row["limiting_potential_if_bound_v"] == pytest.approx(-max(steps[:2]))
+    # EMT geometries may come out flagged: pathway_status stays ok (resume logic), the
+    # validity column carries the verdict and U_L is withheld for invalid sites.
+    assert row["pathway_validity"] == co2rr.pathway_validity(row["geometry_flags"])
+    if row["pathway_validity"] == "ok":
+        assert row["limiting_potential_v"] == pytest.approx(-max(steps[:2]))
+    else:
+        assert math.isnan(row["limiting_potential_v"]) and row["limiting_step"] == ""
     assert "dG_O_formation_from_H2O_ev" not in row
     assert "magmom_COOH_star_final" in row
     cooh_meta = co2rr.read_checkpoint(tmp_path / "pathways" / "Cu" / "top_metal" / "base" / "cooh" / "energy.json")
@@ -203,3 +212,46 @@ def test_site_row_end_to_end_with_emt(tmp_path, monkeypatch, emt):
     # Unconverged DFT input is refused instead of silently combined.
     bad = dict(dft_row, adsorbed_fmax_final_ev_per_ang="0.2")
     assert co2rr.run_site("Cu", "top_metal", bad, ctx)["pathway_status"] == "inconsistent"
+
+    # E(*)/E(CO2*) computed with another cutoff or k-mesh are refused too.
+    for column, value in (("ecut_ev", "400.0"), ("kpts", "3x3x1")):
+        other = dict(dft_row, **{column: value})
+        failed = co2rr.run_site("Cu", "top_metal", other, ctx)
+        assert failed["pathway_status"] == "inconsistent"
+        assert column.split("_")[0] in failed["error_message"]
+
+
+GPAW_LOG = """
+Input parameters:
+  kpts: [{kpts}]
+  maxiter: 180
+  mode: {{ecut: {ecut},
+         name: pw}}
+"""
+
+
+def test_dft_settings_fall_back_to_gpaw_logs(tmp_path, monkeypatch):
+    """Summaries without ecut_ev/kpts are checked against the GPAW logs of run_dft.py."""
+    monkeypatch.setattr(co2rr, "DFT_RESULTS_DIR", tmp_path / "dft")
+    clean = tmp_path / "dft" / "ZnO" / "clean"
+    site = tmp_path / "dft" / "ZnO" / "top_metal"
+    clean.mkdir(parents=True)
+    site.mkdir(parents=True)
+    (clean / "clean_slab.base.txt").write_text(GPAW_LOG.format(kpts="2 3 1", ecut=500.0))
+    (clean / "clean_slab.base.gap_gamma.txt").write_text(GPAW_LOG.format(kpts="5 5 1", ecut=500.0))
+    (site / "ZnO_top_metal.base.txt").write_text(GPAW_LOG.format(kpts="2 3 1", ecut=500.0))
+    row = {"dft_profile": "base"}
+
+    assert co2rr.gpaw_log_settings(clean / "clean_slab.base.txt") == (500.0, "2x3x1")
+    assert co2rr.dft_settings_mismatch("ZnO", "top_metal", row, 500.0, (2, 3, 1)) == ""
+    assert "kpts 2x3x1 != 3x3x1" in co2rr.dft_settings_mismatch("ZnO", "top_metal", row, 500.0, (3, 3, 1))
+    (site / "ZnO_top_metal.base.txt").write_text(GPAW_LOG.format(kpts="2 3 1", ecut=450.0))
+    message = co2rr.dft_settings_mismatch("ZnO", "top_metal", row, 500.0, (2, 3, 1))
+    assert "adsorbed: ecut 450 eV != 500 eV" in message and "clean" not in message
+    # Columns of the summary take precedence over the logs.
+    assert co2rr.dft_settings_mismatch(
+        "ZnO", "top_metal", dict(row, ecut_ev="500", kpts="2x3x1"), 500.0, (2, 3, 1)
+    ) == ""
+    # Nothing to check against: refused, not assumed.
+    (site / "ZnO_top_metal.base.txt").unlink()
+    assert "cannot verify" in co2rr.dft_settings_mismatch("ZnO", "top_metal", row, 500.0, (2, 3, 1))

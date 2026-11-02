@@ -18,6 +18,7 @@ from scripts.simulations.neb.run_neb import (
     band_fit,
     barrier_metrics,
     discover_neb_runs,
+    endpoint_flag_text,
     read_final_images,
     resolve_barrier_resolution,
 )
@@ -79,6 +80,19 @@ def pathway_label(initial_site: str, final_site: str) -> str:
     return f"{initial_site} → {final_site}"
 
 
+def unresolved_reason(result: dict) -> str:
+    """Why no forward barrier is drawn for a pair ('' when the barrier is resolved)."""
+    if result["endpoint_not_minimum"]:
+        ends = [name for name, key in (("initial", "initial_not_minimum"), ("final", "final_not_minimum"))
+                if result[key]]
+        return f"{' and '.join(ends)} endpoint not a minimum along the band"
+    if result["no_internal_saddle"]:
+        return "no internal saddle"
+    if not result["barrier_resolved"]:
+        return f"barrier below {result['barrier_resolution_eV']:.2f} eV resolution"
+    return ""
+
+
 # LOAD ALL RUNS
 def analyze_runs(
     runs: list[dict],
@@ -123,6 +137,7 @@ def analyze_runs(
             "pathway": pathway_label(run["initial_site"], run["final_site"]),
             "converged": converged,
             "climb_activated": bool(run["summary"].get("climb_activated", False)),
+            "climb_skipped": bool(run["summary"].get("climb_skipped", False)),
             "band_fit": band_fit(images) if smooth_band else None,
         }
 
@@ -135,6 +150,7 @@ def analyze_runs(
             f"DeltaE={metrics['reaction_energy_eV']:8.4f} eV   "
             f"E_max image={metrics['highest_image_index']}"
             f"{'   [no internal saddle]' if metrics['no_internal_saddle'] else ''}"
+            f"{f'   [{endpoint_flag_text(metrics)}]' if metrics['endpoint_not_minimum'] else ''}"
             f"{'' if metrics['barrier_resolved'] else '   [no resolved barrier]'}"
             f"{'' if converged else f'   [{status}]'}"
         )
@@ -197,7 +213,16 @@ def save_summary_table(results: list[dict], out: Path):
                 "no_internal_saddle": result["no_internal_saddle"],
                 "barrier_resolution_eV": result["barrier_resolution_eV"],
                 "barrier_resolved": result["barrier_resolved"],
+                "reverse_barrier_resolved": result["reverse_barrier_resolved"],
+                "initial_dip_eV": result["initial_dip_eV"],
+                "final_dip_eV": result["final_dip_eV"],
+                "initial_not_minimum": result["initial_not_minimum"],
+                "final_not_minimum": result["final_not_minimum"],
+                "endpoint_not_minimum": result["endpoint_not_minimum"],
+                "lowest_image_index": result["lowest_image_index"],
+                "barrier_from_lowest_eV": result["barrier_from_lowest_eV"],
                 "climb_activated": result["climb_activated"],
+                "climb_skipped": result["climb_skipped"],
                 "status": result["status"],
                 "folder": result["folder_name"],
             }
@@ -243,14 +268,16 @@ def plot_individual_profile(result: dict, output_dir: Path, dpi: int):
                 label="force-based spline")
 
     highest = result["highest_image_index"]
+    reason = unresolved_reason(result)
 
-    ax.plot(
-        [highest],
-        [relative[highest]],
-        marker="*",
-        markersize=14,
-        linestyle="none",
-    )
+    # The E_max image is marked only for a resolved barrier; a band whose endpoint is not
+    # a minimum marks its lowest image instead.
+    if not reason:
+        ax.plot([highest], [relative[highest]], marker="*", markersize=14, linestyle="none")
+    elif result["endpoint_not_minimum"]:
+        lowest = result["lowest_image_index"]
+        ax.plot([lowest], [relative[lowest]], marker="v", markersize=10, linestyle="none",
+                label=f"lowest image ({lowest})")
 
     ax.axhline(
         0.0,
@@ -270,11 +297,9 @@ def plot_individual_profile(result: dict, output_dir: Path, dpi: int):
         fontsize=12,
     )
 
-    flags = []
-    if result["no_internal_saddle"]:
+    flags = [reason] if reason else []
+    if result["no_internal_saddle"] and result["endpoint_not_minimum"]:
         flags.append("no internal saddle")
-    elif not result["barrier_resolved"]:
-        flags.append(f"barrier below {result['barrier_resolution_eV']:.2f} eV resolution")
     if not result["converged"]:
         flags.append(f"status: {result['status']}")
 
@@ -285,12 +310,23 @@ def plot_individual_profile(result: dict, output_dir: Path, dpi: int):
         fontsize=14,
     )
 
-    text = (
-        f"Forward barrier = {result['forward_barrier_eV']:.3f} eV\n"
-        f"Reverse barrier = {result['reverse_barrier_eV']:.3f} eV\n"
-        f"ΔE = {result['reaction_energy_eV']:.3f} eV\n"
-        f"highest image (E_max) = {highest}"
-    )
+    if not reason:
+        reverse = (f"Reverse barrier = {result['reverse_barrier_eV']:.3f} eV"
+                   if result["reverse_barrier_resolved"] else "Reverse barrier: not resolved")
+        text = (
+            f"Forward barrier = {result['forward_barrier_eV']:.3f} eV\n"
+            f"{reverse}\n"
+            f"ΔE = {result['reaction_energy_eV']:.3f} eV\n"
+            f"highest image (E_max) = {highest}"
+        )
+    else:
+        text = f"No resolved barrier\n({reason})\nΔE = {result['reaction_energy_eV']:.3f} eV"
+        if result["endpoint_not_minimum"]:
+            text += (
+                f"\ninitial dip = {result['initial_dip_eV']:.3f} eV"
+                f"\nfinal dip = {result['final_dip_eV']:.3f} eV"
+                f"\nE_max − E_min = {result['barrier_from_lowest_eV']:.3f} eV"
+            )
 
     ax.text(
         0.98,
@@ -310,7 +346,7 @@ def plot_individual_profile(result: dict, output_dir: Path, dpi: int):
         alpha=0.25,
     )
 
-    if fit is not None:
+    if fit is not None or (reason and result["endpoint_not_minimum"]):
         ax.legend(loc="lower left", fontsize=9)
 
     fig.tight_layout()
@@ -337,6 +373,11 @@ def plot_barriers(
     output_dir: Path,
     dpi: int,
 ):
+    """Forward/reverse bars per pathway, drawn only for resolved barriers.
+
+    A pathway without a resolved barrier (endpoint not a minimum along the band, no
+    internal saddle, or below the resolution) gets a text note at its position instead.
+    """
     selected = sorted(
         results,
         key=lambda item: (
@@ -348,16 +389,14 @@ def plot_barriers(
     labels = []
     for result in selected:
         label = result["pathway"]
-        if result["no_internal_saddle"]:
-            label += "\n(no internal saddle)"
-        elif not result["barrier_resolved"]:
-            label += "\n(below resolution)"
         if not result["converged"]:
             label += f"\n[{result['status']}]"
         labels.append(label)
 
-    forward = [result["forward_barrier_eV"] for result in selected]
-    reverse = [result["reverse_barrier_eV"] for result in selected]
+    # Bars only for resolved barriers; an unresolved pair gets a note instead of a bar.
+    nan = float("nan")
+    forward = [result["forward_barrier_eV"] if result["barrier_resolved"] else nan for result in selected]
+    reverse = [result["reverse_barrier_eV"] if result["reverse_barrier_resolved"] else nan for result in selected]
 
     x = np.arange(len(labels))
     width = 0.38
@@ -390,6 +429,20 @@ def plot_barriers(
                     va="bottom",
                     fontsize=9,
                 )
+
+    for position, result in zip(x, selected):
+        reason = unresolved_reason(result)
+        if reason:
+            ax.annotate(
+                f"no resolved barrier\n({reason})",
+                xy=(position, 0.0),
+                xytext=(0, 6),
+                textcoords="offset points",
+                ha="center",
+                va="bottom",
+                fontsize=8,
+                rotation=90,
+            )
 
     ax.axhline(
         0.0,

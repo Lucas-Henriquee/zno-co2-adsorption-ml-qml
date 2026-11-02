@@ -38,10 +38,19 @@ DEFAULT_ENDPOINT_FORCE_FACTOR = 1.5
 MIN_ENDPOINT_DISPLACEMENT_ANG = 0.3
 # Smallest forward barrier (eV) reported as resolved; methods.neb.barrier_resolution_ev.
 DEFAULT_BARRIER_RESOLUTION_EV = 0.03
+# NEB force projection and spring constant (eV/A^2; the ASE default), recorded per pair.
+NEB_METHOD = "improvedtangent"
+NEB_SPRING_CONSTANT = 0.1
 
 SUMMARY_JSON = "neb_run_summary.json"
 FINAL_IMAGES_TRAJ = "neb_final_images.traj"
 PATHS_SUMMARY_CSV = "neb_paths_summary.csv"
+# Written by rank 0 at every phase change, read by run_status while the band is optimised.
+PHASE_JSON = "neb_phase.json"
+
+PHASE_PLAIN = "plain"
+PHASE_CLIMBING = "climbing_image"
+PHASE_PLAIN_CONTINUED = "plain_continued"
 
 STATUS_CONVERGED = "converged"
 STATUS_NOT_CONVERGED = "max_steps_reached"
@@ -72,9 +81,16 @@ PATHS_SUMMARY_FIELDS = [
     "max_steps",
     "n_steps_plain",
     "n_steps_ci",
+    "phase2",
+    "n_steps_phase2",
     "climb_activated",
+    "climb_skipped",
+    "climb_skip_reason",
     "converged_plain",
     "converged_ci",
+    "converged_phase2",
+    "neb_method",
+    "spring_constant_ev_per_ang2",
     "ecut",
     "kpts",
     "interpolation",
@@ -89,6 +105,14 @@ PATHS_SUMMARY_FIELDS = [
     "no_internal_saddle",
     "barrier_resolution_eV",
     "barrier_resolved",
+    "reverse_barrier_resolved",
+    "initial_dip_eV",
+    "final_dip_eV",
+    "initial_not_minimum",
+    "final_not_minimum",
+    "endpoint_not_minimum",
+    "lowest_image_index",
+    "barrier_from_lowest_eV",
     "message",
 ]
 
@@ -137,7 +161,8 @@ def parse_args(argv=None):
         "--fmax-ci",
         type=float,
         default=None,
-        help=f"Force threshold of the climbing-image phase (default: YAML or {DEFAULT_FMAX_CI}).",
+        help=f"Force threshold of the second phase: climbing image, or continued plain NEB when the "
+        f"band has no internal maximum (default: YAML or {DEFAULT_FMAX_CI}).",
     )
     parser.add_argument(
         "--dft-fmax",
@@ -153,14 +178,15 @@ def parse_args(argv=None):
         "--climb",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="Run a climbing-image phase after the plain phase (default: on).",
+        help="After the plain phase, climb the highest internal image if it is above both endpoints; "
+             "otherwise continue the plain NEB to --fmax-ci (default: on).",
     )
     parser.add_argument("--optimizer", choices=["FIRE", "BFGS"], default="FIRE",)
     parser.add_argument(
         "--climb-start-fraction",
         type=float,
         default=0.30,
-        help="Fraction of --steps given to the plain phase; the CI phase gets the remaining steps.",
+        help="Fraction of --steps given to the plain phase; the second phase gets the remaining steps.",
     )
     parser.add_argument("--parallel-images", action="store_true",)
     parser.add_argument("--overwrite", action="store_true",)
@@ -321,8 +347,19 @@ def barrier_metrics(energies, resolution_ev: float = DEFAULT_BARRIER_RESOLUTION_
     Ea_fwd = 0 and Ea_rev = |dE|. ``highest_image_index`` is the image of E_max (an
     endpoint when there is no internal maximum). ``no_internal_saddle`` is True when the
     highest internal image is not above both endpoints (monotonic profile).
-    ``barrier_resolved`` is True only for an internal saddle with Ea_fwd above
-    ``resolution_ev``; smaller values are below what a 3-image band and the SCF/fmax
+
+    Endpoint check: ``initial_dip_eV = E_IS - min(internal)`` and
+    ``final_dip_eV = E_FS - min(internal)`` are positive when the band goes below an
+    endpoint. An endpoint is flagged as not a minimum along the band
+    (``initial_not_minimum`` / ``final_not_minimum``, ``endpoint_not_minimum`` for either)
+    when its dip exceeds ``resolution_ev``: the relaxed DFT site is then not the basin the
+    band connects, so E_max - E_IS is not a migration barrier. ``lowest_image_index`` and
+    ``barrier_from_lowest_eV = E_max - min(all images)`` describe the band from its lowest
+    image instead.
+
+    ``barrier_resolved`` (forward) and ``reverse_barrier_resolved`` are True only for an
+    internal saddle, both endpoints being minima along the band, and the barrier above
+    ``resolution_ev``; smaller values are below what a 3-5 image band and the SCF/fmax
     tolerances can resolve and are reported as no resolved barrier.
 
     Returns None when there is no internal image or an energy is not finite.
@@ -332,31 +369,59 @@ def barrier_metrics(energies, resolution_ev: float = DEFAULT_BARRIER_RESOLUTION_
     if len(energies) < 3 or not all(math.isfinite(value) for value in energies):
         return None
 
+    resolution = float(resolution_ev)
     e_is = energies[0]
     e_fs = energies[-1]
     internal = energies[1:-1]
     highest_internal = 1 + int(np.argmax(internal))
     e_internal_max = energies[highest_internal]
+    e_internal_min = min(internal)
     highest = int(np.argmax(energies))
     e_max = energies[highest]
+    lowest = int(np.argmin(energies))
 
     no_internal_saddle = not (e_internal_max > e_is and e_internal_max > e_fs)
     forward = e_max - e_is
+    reverse = e_max - e_fs
+    initial_dip = e_is - e_internal_min
+    final_dip = e_fs - e_internal_min
+    initial_not_minimum = bool(initial_dip > resolution)
+    final_not_minimum = bool(final_dip > resolution)
+    endpoint_not_minimum = initial_not_minimum or final_not_minimum
+    saddle_ok = not no_internal_saddle and not endpoint_not_minimum
 
     return {
         "energies": energies,
         "relative_energies": [value - e_is for value in energies],
         "forward_barrier_eV": forward,
-        "reverse_barrier_eV": e_max - e_fs,
+        "reverse_barrier_eV": reverse,
         "reaction_energy_eV": e_fs - e_is,
         "highest_image_index": highest,
         "highest_internal_image_index": highest_internal,
         "no_internal_saddle": no_internal_saddle,
-        "barrier_resolution_eV": float(resolution_ev),
-        "barrier_resolved": bool(forward > float(resolution_ev) and not no_internal_saddle),
+        "barrier_resolution_eV": resolution,
+        "barrier_resolved": bool(forward > resolution and saddle_ok),
+        "reverse_barrier_resolved": bool(reverse > resolution and saddle_ok),
+        "initial_dip_eV": initial_dip,
+        "final_dip_eV": final_dip,
+        "initial_not_minimum": initial_not_minimum,
+        "final_not_minimum": final_not_minimum,
+        "endpoint_not_minimum": endpoint_not_minimum,
+        "lowest_image_index": lowest,
+        "barrier_from_lowest_eV": e_max - energies[lowest],
         "n_total_images": len(energies),
         "n_internal_images": len(energies) - 2,
     }
+
+
+def endpoint_flag_text(metrics: dict) -> str:
+    """Short note for a band whose endpoint is not a minimum along it ('' otherwise)."""
+    if not metrics.get("endpoint_not_minimum"):
+        return ""
+    return (
+        f"endpoint not a minimum along the band: initial dip {metrics['initial_dip_eV']:.3f} eV, "
+        f"final dip {metrics['final_dip_eV']:.3f} eV"
+    )
 
 
 # DFT INPUTS
@@ -511,17 +576,72 @@ def plain_step_budget(steps: int, climb_start_fraction: float, climb: bool) -> i
     return int(round(climb_start_fraction * steps))
 
 
-def run_neb_phases(neb, optimizer, *, fmax: float, fmax_ci: float, steps: int,
-                   climb: bool, climb_start_fraction: float) -> dict:
-    """Plain NEB, then (always, if climb) a climbing-image phase on the remaining budget.
+def current_band_energies(neb) -> list[float]:
+    """Energies of the band at its current positions, endpoints included.
 
-    ASE optimizers accumulate ``nsteps`` across ``run`` calls and each call
-    allows ``steps`` more, so the CI phase gets ``steps - n_steps_plain``.
+    ASE 3.29 ``NEB.get_forces`` stores ``neb.energies`` (all images) and the optimizer
+    calls it after every step, so after ``optimizer.run`` it holds the energies of the
+    final positions. With ``parallel=True`` each internal energy is broadcast from the
+    ranks of its image, so every rank holds the same array and takes the same decision.
+    ``get_forces`` is called (on all ranks) only if no energies were stored yet.
+    """
+    energies = getattr(neb, "energies", None)
+    if energies is None:
+        neb.get_forces()
+        energies = neb.energies
+    return [float(value) for value in energies]
+
+
+def climb_decision(energies) -> tuple[bool, str]:
+    """(climb, reason): climb only when the highest internal image is above both endpoints.
+
+    ASE climbs the highest internal image unconditionally; on a band without an internal
+    maximum that pushes an image uphill along the tangent towards an endpoint.
+    """
+    energies = [float(value) for value in energies]
+    if len(energies) < 3 or not all(math.isfinite(value) for value in energies):
+        return False, f"band energies not usable for the climb decision: {energies}"
+    internal = energies[1:-1]
+    imax = 1 + int(np.argmax(internal))
+    e_is, e_fs = energies[0], energies[-1]
+    if energies[imax] > e_is and energies[imax] > e_fs:
+        return True, (
+            f"highest internal image {imax} is {energies[imax] - e_is:+.4f} eV vs IS and "
+            f"{energies[imax] - e_fs:+.4f} eV vs FS"
+        )
+    return False, (
+        f"no internal maximum after the plain phase: highest internal image {imax} is "
+        f"{energies[imax] - e_is:+.4f} eV vs IS and {energies[imax] - e_fs:+.4f} eV vs FS"
+    )
+
+
+def run_neb_phases(neb, optimizer, *, fmax: float, fmax_ci: float, steps: int,
+                   climb: bool, climb_start_fraction: float, on_phase=None) -> dict:
+    """Plain NEB, then (if climb) a second phase on the remaining budget to ``fmax_ci``.
+
+    The second phase is a climbing-image phase only when, after the plain phase, the
+    highest internal image is above both endpoints (``climb_decision``). Otherwise the
+    climbing image is not switched on: the plain NEB continues to ``fmax_ci`` and the
+    record has ``climb_skipped=True`` and ``climb_skip_reason``.
+
+    ``n_steps_plain`` counts phase 1 only; ``n_steps_phase2`` the second phase whatever it
+    is (``phase2`` = "climbing_image" or "plain_continued"); ``n_steps_ci`` and
+    ``converged_ci`` refer to an actual climbing-image phase (0 / None when skipped).
+    ASE optimizers accumulate ``nsteps`` across ``run`` calls and each call allows
+    ``steps`` more, so the second phase gets ``steps - n_steps_plain``.
+
+    ``on_phase(info)`` is called at the start of each phase (run_neb writes it to
+    neb_phase.json for the status dashboard).
     """
     start = int(optimizer.nsteps)
     plain_budget = plain_step_budget(steps, climb_start_fraction, climb)
 
-    print0(f"[neb] Phase 1: plain NEB, fmax={fmax}, up to {plain_budget} steps")
+    def notify(**info):
+        if on_phase is not None:
+            on_phase(info)
+
+    print0(f"[neb] Phase 1: plain NEB, fmax={fmax}, up to {plain_budget} steps", flush=True)
+    notify(phase=PHASE_PLAIN, phase_start_step=0, fmax_target=float(fmax), step_budget=plain_budget)
     converged_plain = bool(optimizer.run(fmax=fmax, steps=plain_budget))
     n_steps_plain = int(optimizer.nsteps) - start
 
@@ -531,30 +651,67 @@ def run_neb_phases(neb, optimizer, *, fmax: float, fmax_ci: float, steps: int,
         "n_steps_plain": n_steps_plain,
         "converged_plain": converged_plain,
         "climb_activated": False,
+        "climb_skipped": False,
+        "climb_skip_reason": "",
+        "climb_decision_energies_ev": None,
         "fmax_ci": float(fmax_ci) if climb else None,
+        "phase2": None,
+        "phase2_step_budget": 0,
+        "n_steps_phase2": 0,
+        "converged_phase2": None,
         "ci_step_budget": 0,
         "n_steps_ci": 0,
         "converged_ci": None,
     }
 
     if climb:
-        ci_budget = int(steps) - n_steps_plain
-        print0(f"[neb] Phase 2: climbing image, fmax={fmax_ci}, up to {ci_budget} steps")
-        neb.climb = True
-        converged_ci = bool(optimizer.run(fmax=fmax_ci, steps=ci_budget))
+        budget = int(steps) - n_steps_plain
+        energies = current_band_energies(neb)
+        do_climb, reason = climb_decision(energies)
+        record["climb_decision_energies_ev"] = energies
+        if do_climb:
+            print0(
+                f"[neb] Phase 2: climbing image after {n_steps_plain} plain steps, fmax={fmax_ci}, "
+                f"up to {budget} steps ({reason})",
+                flush=True,
+            )
+            phase = PHASE_CLIMBING
+            neb.climb = True
+        else:
+            print0(
+                f"[neb] Phase 2: climbing image skipped after {n_steps_plain} plain steps ({reason}); "
+                f"plain NEB continues, fmax={fmax_ci}, up to {budget} steps",
+                flush=True,
+            )
+            phase = PHASE_PLAIN_CONTINUED
+            record.update({"climb_skipped": True, "climb_skip_reason": reason})
+        notify(phase=phase, phase_start_step=n_steps_plain, fmax_target=float(fmax_ci),
+               step_budget=budget, climb_skipped=not do_climb, reason=reason)
+
+        converged_phase2 = bool(optimizer.run(fmax=fmax_ci, steps=budget))
+        n_steps_phase2 = int(optimizer.nsteps) - start - n_steps_plain
         record.update(
             {
-                "climb_activated": True,
-                "ci_step_budget": ci_budget,
-                "n_steps_ci": int(optimizer.nsteps) - start - n_steps_plain,
-                "converged_ci": converged_ci,
+                "phase2": phase,
+                "phase2_step_budget": budget,
+                "n_steps_phase2": n_steps_phase2,
+                "converged_phase2": converged_phase2,
             }
         )
-        converged = converged_ci
+        if do_climb:
+            record.update(
+                {
+                    "climb_activated": True,
+                    "ci_step_budget": budget,
+                    "n_steps_ci": n_steps_phase2,
+                    "converged_ci": converged_phase2,
+                }
+            )
+        converged = converged_phase2
     else:
         converged = converged_plain
 
-    record["n_steps_total"] = record["n_steps_plain"] + record["n_steps_ci"]
+    record["n_steps_total"] = record["n_steps_plain"] + record["n_steps_phase2"]
     record["converged"] = converged
     return record
 
@@ -563,6 +720,12 @@ def run_neb_phases(neb, optimizer, *, fmax: float, fmax_ci: float, steps: int,
 def write_json(path: Path, payload: dict):
     with path.open("w", encoding="utf-8") as handle:
         json.dump(payload, handle, indent=2, default=str)
+
+
+def write_phase_marker(path: Path, world, info: dict) -> None:
+    """Current optimisation phase of a pair (rank 0), for the live status dashboard."""
+    if world.rank == 0:
+        write_json(path, info)
 
 
 def discover_neb_runs(base: Path) -> list[dict]:
@@ -805,11 +968,14 @@ def _run_pair(record: dict, *, material: str, initial_site: str, final_site: str
         for i, image in enumerate(images[1:-1]):
             image.calc = make_calculator(settings, out_dir / f"neb_image_{i + 1}.txt")
 
+    record["neb_method"] = NEB_METHOD
+    record["spring_constant_ev_per_ang2"] = NEB_SPRING_CONSTANT
     neb = NEB(
         images,
+        k=NEB_SPRING_CONSTANT,
         parallel=bool(use_parallel),
         climb=False,
-        method="improvedtangent",
+        method=NEB_METHOD,
         allow_shared_calculator=False,
     )
 
@@ -835,6 +1001,7 @@ def _run_pair(record: dict, *, material: str, initial_site: str, final_site: str
             steps=args.steps,
             climb=args.climb,
             climb_start_fraction=args.climb_start_fraction,
+            on_phase=functools.partial(write_phase_marker, out_dir / PHASE_JSON, world),
         )
     record.update(phases)
 
@@ -858,6 +1025,9 @@ def _run_pair(record: dict, *, material: str, initial_site: str, final_site: str
         raise PairAborted(STATUS_INVALID_ENERGIES, f"Non-finite image energies: {energies}")
 
     record.update({key: value for key, value in metrics.items() if key != "energies"})
+    note = endpoint_flag_text(metrics)
+    if note:
+        print0(f"[neb] WARNING {material} | {initial_site} -> {final_site}: {note}; no barrier is reported.")
     record["status"] = STATUS_CONVERGED if phases["converged"] else STATUS_NOT_CONVERGED
 
 
