@@ -10,5 +10,6 @@ if [[ ! -x "${SETUP_SCRIPT}" ]]; then
   exit 1
 fi
 
-# Use the shared simulation environment definition.
+# Create (or validate, if it exists) the simulation environment used by the notebooks.
+# Accepts the options of setup_environment.sh, e.g. --env NAME, --manager micromamba.
 exec "${SETUP_SCRIPT}" simulation "$@"

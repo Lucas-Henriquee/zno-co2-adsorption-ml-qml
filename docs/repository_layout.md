@@ -1,64 +1,41 @@
-# Repository map
-
-`run_all.sh` coordinates the four stage-specific public entry points.
-Their Python implementations live in `scripts/workflows/`.
+# Repository layout
 
 ```text
 QML_ZnO/
-├── run_all.sh
-├── run_simulations.sh
-├── run_datasets.sh
-├── run_models.sh
-├── run_analysis.sh
-├── configs/
-│   ├── simulations/
-│   ├── datasets/
-│   ├── models/
-│   └── analysis/
-├── environments/
+├── run_simulations.sh, run_datasets.sh, run_models.sh, run_analysis.sh, run_all.sh
+├── requirements*.txt          # pip subsets (no GPAW)
+├── configs/                   # simulations/, datasets/, models/, analysis/
+├── environments/              # conda environment files
 ├── scripts/
-│   ├── environment/
-│   ├── simulations/       # dft, tddft, md, neb, co2rr
+│   ├── workflows/             # modules behind the launchers, run_status
+│   ├── environment/           # setup_environment.sh, check_environment.sh
+│   ├── simulations/           # dft (incl. build_geometries), tddft, co2rr, md, neb
 │   ├── datasets/
-│   ├── models/            # ml, qml, qml_ibm, benchmarks
+│   ├── models/                # ml, qml, qml_ibm, benchmarks, evaluate_grouped
 │   ├── analysis/
 │   ├── visualization/
 │   ├── common/
-│   ├── legacy/
-│   └── workflows/
+│   └── legacy/                # first-campaign scripts, provenance only
 ├── data/
-│   ├── geometries/
-│   ├── generated/
-│   └── qml_datasets/
+│   ├── geometries/ZnO/        # starting structures
+│   └── generated/<run-id>/    # dataset runs
 ├── results/
-│   ├── simulations/
-│   ├── models/
-│   ├── analyses/
-│   └── benchmarks/       # saved SVM, QSVM, and IBM comparisons
-├── figures/
-├── notebooks/
+│   ├── simulations/<run-id>/
+│   ├── models/<run-id>/
+│   ├── analyses/<run-id>/
+│   ├── workflows/<run-id>/    # run_all.sh manifests and logs
+│   └── _invalid_ic_v1/        # first campaign, invalid
+├── notebooks/                 # zno-co2-lucas.ipynb, zno-co2-analysis.ipynb, launchers
 ├── docs/
 └── tests/
 ```
 
-The active notebook and its launchers are in `notebooks/`.
-Keep Python module calls rooted here, for example
-`python -m scripts.simulations.dft.run_dft --help`.
-
-## Existing campaigns
-
-Saved campaigns have descriptive names based on their method and comparison.
-Repeated runs use numbered suffixes. Scientific settings are preserved;
-path references use the current locations.
-Generated run directories are ignored by Git.
-
-The older `scripts/workflows/run_pipeline.py` operates on shared historical
-paths. Use the root launchers for new work. Specialized plotting scripts such as
-the archived `analysis_plot2.py`, `plot_ml_results.py`, and the benchmark figures describe
-specific earlier campaigns; they are not the generic analysis entry point.
-
-Usage guides are centralized here. Former workflow shell paths are compatibility
-wrappers, so existing terminal commands continue to work.
-
-See [reproduction](reproduction.md) for the active route and
-[historical code](../scripts/legacy/README.md) for the moved implementations.
+- Run Python modules from the repository root, e.g.
+  `python -m scripts.simulations.md.run_md --help`.
+- Without `--run-id` the stage launchers number runs (`simulation_01`, `dataset_01`,
+  `analysis_01`, `<method>_01` for models). Run directories are ignored by Git; their
+  READMEs document the layout.
+- `scripts/legacy/workflows/run_pipeline.py` and the other scripts in `scripts/legacy/`
+  use the flat first-campaign paths ([scripts/legacy/README.md](../scripts/legacy/README.md)).
+  `scripts/visualization/benchmarks/` also reads first-campaign paths
+  ([figures.md](figures.md)).

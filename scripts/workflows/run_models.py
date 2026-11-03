@@ -20,6 +20,7 @@ import yaml
 
 from scripts.models.benchmarks.run_benchmarks import FEATURE_SETS
 from scripts.common.run_names import next_run_name
+from scripts.workflows.active_environment import active_environment
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -504,10 +505,7 @@ def main() -> None:
     config_path = Path(config["_config_path"])
     shutil.copy2(config_path, run_dir / "config.yaml")
     execution = require_mapping(config, "execution")
-    environment_name = os.environ.get(
-        "QML_ZNO_ACTIVE_ENVIRONMENT",
-        str(execution.get("environment", "qml-zno-modeling")),
-    )
+    environment_name = active_environment(str(execution.get("environment", "qml-zno-modeling")))
     manifest_path = run_dir / "run_manifest.json"
     manifest: dict[str, Any] = {
         "schema_version": 1,

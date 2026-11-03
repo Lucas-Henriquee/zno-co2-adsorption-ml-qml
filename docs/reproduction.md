@@ -1,14 +1,13 @@
-# Run the local workflow
+# Combined workflow
 
-Use the existing simulation outputs to rebuild analysis tables, datasets,
-local models, and model figures. The commands below run from the project root.
-Install the [two environments](../environments/README.md) first.
-
-## Preview
+`run_all.sh` chains the stage launchers for one run ID: science analysis, datasets,
+local models, model analysis, optionally preceded by new simulations. It runs in
+`QML_ZNO_MODEL_ENV`; each stage launcher uses its own environment variable
+([environments/README.md](../environments/README.md)).
 
 ```bash
 ./run_all.sh --run-id local_reproduction_01 \
-  --source-results results \
+  --source-results results/simulations/<run-id> \
   --dataset-config configs/datasets/zno_existing_results.yaml \
   --model-config configs/models/zno_local.yaml \
   --analysis-config configs/analysis/zno_current.yaml \
@@ -16,50 +15,44 @@ Install the [two environments](../environments/README.md) first.
   --dry-run
 ```
 
-Replace `--dry-run` with `--execute` to run the plan.
-Choose a new run ID for each execution. The coordinator stops on a failed stage.
+Replace `--dry-run` (the default) with `--execute` to run the plan. The dry run does not
+validate inputs that later stages generate.
 
-| Stage | Input | Output |
+| Stage | Command | Output |
 | --- | --- | --- |
-| Scientific analysis | Selected simulation results | `results/analyses/ID_science/science/` |
-| Datasets | Same results and generated ranking | `data/generated/ID/` |
-| Local SVM and QSVM | Selected generated dataset | `results/models/ID/` |
-| Model analysis | That model run | `results/analyses/ID_models/models/` |
+| Science analysis | `run_analysis.sh science` | `results/analyses/<ID>_science/` |
+| Datasets | `run_datasets.sh all`, ranking from the science analysis | `data/generated/<ID>/` |
+| Local SVM and QSVM | `run_models.sh local` on `--model-dataset` | `results/models/<ID>/` |
+| Model analysis | `run_analysis.sh models` | `results/analyses/<ID>_models/` |
 
-The coordinator honors the output roots in the selected YAML files.
-Commands, configuration hashes, exit codes, and logs are recorded in
-`results/workflows/ID/`. Stage manifests record input and output hashes.
+- `--run-id` and the dataset, model and analysis configs are required. The plan is
+  refused when any stage output of that run ID already exists.
+- `--model-dataset` is relative to `data/generated/<ID>/`.
+- The workflow stops at the first failed stage, or when a selected config file changes
+  during execution. Commands, configuration hashes, exit
+  codes and logs go to `results/workflows/<ID>/`; stage manifests record input and
+  output hashes.
+- Output roots are taken from the selected YAML files.
+- IBM submission is never included ([models.md](models.md)).
 
-## Include simulations
+## New simulations
 
-Replace `--source-results results` with:
+Replace `--source-results results/simulations/<run-id>` with:
 
 ```text
 --simulate --simulation-config configs/simulations/zno_production.yaml
 ```
 
-This starts new scientific calculations using the supplied settings.
-The [simulation guide](simulations.md) describes dependencies and MPI.
-The simulation configuration follows the notebook; standalone defaults differ.
+This first runs `run_simulations.sh all` into `results/simulations/<ID>/`
+([simulations.md](simulations.md)).
 
-## Reproduce a particular experiment
+## Reproducing a specific result
 
-The supplied local profile uses its own settings: seed 42, a 30% test split,
-30 samples, and a three-qubit QSVM with `power_minmax` preprocessing.
-It is not the selected six-qubit, five-seed comparison in the manuscript.
-Use the configuration, split, and metadata associated with the desired result.
+Use the configuration, split and metadata of that result; `zno_local.yaml` is one
+profile, not every manuscript experiment ([configs/models/README.md](../configs/models/README.md)).
+Archive the source commit, configurations, environment versions and inputs with a
+published result. `requirements.txt` is not a lockfile.
 
-The [figure guide](figures.md) identifies saved benchmark sources.
-The [dataset reference](datasets_reference.md) explains the input columns.
-Archive the source commit, configurations, environment versions, and selected
-inputs with a published result. `requirements.txt` is not an environment lockfile.
-
-## Scope
-
-Rebuilding tables and figures from saved outputs does not repeat the underlying
-simulations or hardware measurements. A fresh simulation campaign requires
-convergence checks, and a new hardware run can differ because of sampling noise
-and device calibration.
-
-IBM execution is separate through [the model launcher](models.md); it is never
-included in `run_all.sh`.
+Rebuilding tables and figures from saved outputs repeats neither the simulations nor
+the hardware measurements. A new simulation campaign needs its own convergence checks;
+a new hardware run differs by sampling noise and device calibration.

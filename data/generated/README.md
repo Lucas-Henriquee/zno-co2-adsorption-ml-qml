@@ -1,17 +1,16 @@
-# Generated Dataset Runs
+# Dataset runs
 
-Each subdirectory is an isolated dataset generation run created by
-`scripts/workflows/run_datasets.sh`.
+One directory per run of `./run_datasets.sh` (or `python -m scripts.workflows.run_datasets`).
 
 ```text
 <run-id>/
 ├── config.yaml
-├── run_manifest.json
+├── run_manifest.json     # inputs with SHA-256, commands, versions, method status
 ├── logs/
 ├── tddft/
 ├── multitech/
 └── qml_features/
 ```
 
-Generated run directories are excluded from Git. The manifest provides the
-lineage needed to reproduce a dataset from its original scientific inputs.
+Method directories exist only for the selected methods. Run directories are ignored by
+Git.

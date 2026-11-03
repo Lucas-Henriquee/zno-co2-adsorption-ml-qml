@@ -1,0 +1,12 @@
+# pip equivalent of environments/modeling.yaml: requirements.txt plus classical ML,
+# local QML and IBM Runtime (run_models.sh). Pins reproduce the runs in results/.
+#   python -m pip install -r requirements-modeling.txt
+-r requirements.txt
+# qiskit-machine-learning 0.8.4 requires scipy < 1.16 and qiskit < 2.
+scipy<1.16
+scikit-learn==1.6.1
+joblib>=1.2
+qiskit==1.4.6
+qiskit-aer==0.17.2
+qiskit-machine-learning==0.8.4
+qiskit-ibm-runtime==0.43.1

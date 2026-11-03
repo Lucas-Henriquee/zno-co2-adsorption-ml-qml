@@ -28,3 +28,12 @@ results/analyses/*/
 
 # Combined-workflow logs and manifests are local run outputs.
 results/workflows/*/
+
+# Local Claude Code state and agent worktrees.
+.claude/
+
+# Local, untracked runs made before the 2026-10 audit (first campaign, invalid).
+results/_local_archive_pre_audit/
+
+# Notebooks executed by notebooks/run_zno_notebook.sh.
+notebooks/*.executed.ipynb

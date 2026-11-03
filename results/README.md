@@ -1,17 +1,13 @@
 # Results
 
-| Location | Contents |
+| Path | Content |
 | --- | --- |
-| `simulations/<run-id>/` | Simulation campaigns |
-| `models/<run-id>/` | Model runs |
-| `analyses/<run-id>/` | Tables and plots |
-| `workflows/<run-id>/` | Combined-workflow manifests and logs |
-| `_invalid_ic_v1/` | Archived results of the first IC campaign; **invalid**, see its README |
+| `simulations/<run-id>/` | Simulation runs ([layout](simulations/README.md)) |
+| `models/<run-id>/` | Model runs ([layout](models/README.md)) |
+| `analyses/<run-id>/` | Analysis runs ([layout](analyses/README.md)) |
+| `workflows/<run-id>/` | `run_all.sh` manifests and stage logs |
+| `_invalid_ic_v1/` | First campaign, invalid ([README](_invalid_ic_v1/README.md)) |
+| `_local_archive_pre_audit/` | Untracked local runs made before the 2026-10 audit, invalid; ignored by Git |
 
-New runs use distinct IDs and record their inputs and settings.
-
-`simulations/zno_wurtzite_production/` is an interrupted campaign with
-different input geometries. Do not use it.
-
-The [figure guide](../docs/figures.md) describes the manuscript figures; they must be
-regenerated from new runs, since the earlier benchmarks are in `_invalid_ic_v1/`.
+Run directories are ignored by Git. Manuscript figures must be regenerated from new
+runs ([docs/figures.md](../docs/figures.md)).

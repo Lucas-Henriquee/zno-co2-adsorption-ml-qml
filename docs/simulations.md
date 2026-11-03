@@ -1,52 +1,110 @@
-# Simulation Scripts
+# Simulations
 
-Method implementations live in `scripts/simulations/`. Use the workflow runner instead
-of calling these modules directly for normal project runs:
+`run_simulations.sh` (or `python -m scripts.workflows.run_simulations` inside the
+simulation environment) runs the GPAW methods of `scripts/simulations/` into an
+isolated run directory, `results/simulations/<run-id>/`.
 
 ```bash
 ./run_simulations.sh all --dry-run
 ./run_simulations.sh dft --run-id zno_dft_01
 ./run_simulations.sh dft tddft --run-id zno_optical_01
-./run_simulations.sh md neb --run-id zno_dynamics_paths_01
+./run_simulations.sh md neb --run-id zno_dynamics_01
+./run_simulations.sh all --run-id zno_dft_01 --resume
 ```
 
-Prerequisites are added automatically. For example, selecting `tddft` resolves
-to `geometry -> dft -> tddft`. Use `--no-dependencies` only when intentionally
-continuing from compatible inputs in the same isolated run.
+Environment selection: [environments/README.md](../environments/README.md).
+`notebooks/zno-co2-lucas.ipynb` calls the same module.
 
-Useful options:
+## Methods
 
-```text
---config PATH           Select the notebook-derived YAML profile or an explicit profile.
---run-id NAME           Assign a readable, unique output directory name.
---resume                Continue a run and skip completed methods.
---dry-run               Validate and display commands without creating files.
---materials ZnO,TiO2    Override the configured material list.
---sites bridge          Override the configured adsorption sites.
---mpi-processes 10      Override the configured process count.
+`geometry`, `dft`, `tddft`, `co2rr` (alias `pathways`), `md`, `neb`, or `all`.
+Prerequisites are added automatically: `geometry` -> `dft` -> {`tddft`, `co2rr`, `md`,
+`neb`}. For example, `tddft` resolves to `geometry, dft, tddft`.
+
+## Options
+
+| Option | Effect |
+| --- | --- |
+| `--config PATH` | YAML file (default `configs/simulations/zno_production.yaml`; with `--resume`, the run's `config.yaml`) |
+| `--run-id NAME` | Run directory name (letters, digits, `.`, `_`, `-`); default: next `simulation_NN` |
+| `--resume` | Continue an existing run; needs `--run-id` |
+| `--retry-failed` | With `--resume`: archive outputs of failed/interrupted methods to `failed_attempts/` and rerun them |
+| `--no-dependencies` | Do not add prerequisites; refused without `--resume` when a selected method has prerequisites |
+| `--dry-run` | Validate and print the commands; creates nothing |
+| `--materials ZnO` | Comma-separated material override |
+| `--sites top_metal,bridge` | Comma-separated site override; NEB needs at least two sites |
+| `--mpi-processes N` | Override `execution.mpi.processes` |
+| `--list-methods` | Print the methods |
+
+`carbonate` and `tridentate` are exploratory sites, accepted only with `geometry` and
+`dft` (e.g. `dft --sites carbonate`).
+
+## Run directory and resume
+
+- A new run copies the configuration to `config.yaml` and writes `run_manifest.json`
+  (commands, configuration hash, environment name, package versions, materials, sites,
+  MPI processes, per-method status and timestamps). An existing run directory is
+  never reused without `--resume`.
+- `--resume` without `--config` reads the run's `config.yaml` snapshot. A config file
+  whose hash differs from the recorded one is refused, so an edited reference YAML
+  cannot continue an old run.
+- Resume also refuses a different environment name, package versions, materials,
+  sites, MPI process count or `OMP_NUM_THREADS`. The launcher, `python -m` inside the
+  same environment and the notebook record the same environment name (a prefix path
+  by its last component). A run started with plain `python -m` (no launcher) by an
+  older version of the workflow recorded `qml-zno-simulation`; resume it with
+  `QML_ZNO_ACTIVE_ENVIRONMENT=qml-zno-simulation` in that same environment.
+- `run_simulations` writes only the method outputs. The CO₂RR corrections
+  (`co2rr_corrections`), the MD trajectory analysis and the NEB tables are analysis
+  steps ([figures](figures.md)); `run_analysis.sh science` does not run the CO₂RR
+  corrections yet, so run `co2rr_corrections` before it to get variant c.
+- Completed methods are skipped. A method with status `failed` or `running`
+  (interrupted) stops the run unless `--retry-failed` is given; otherwise use a new
+  run ID.
+- `--resume --dry-run` only prints the plan; the manifest checks run without
+  `--dry-run`.
+
+Run layout: [results/simulations/README.md](../results/simulations/README.md).
+
+## Status dashboard
+
+Read-only; without a run ID it shows the most recently modified run.
+
+```bash
+python -m scripts.workflows.run_status zno_run_01
+FORCE_COLOR=1 watch -c -n 60 python -m scripts.workflows.run_status zno_run_01
 ```
 
-Every non-dry run writes to `results/simulations/<run-id>/`, saves an immutable
-configuration snapshot, and records commands, parameters, status, paths, and
-timestamps in `run_manifest.json`. A run directory is never reused implicitly.
-Resume mode verifies the configuration hash and execution context, then refuses
-to rerun failed or interrupted methods, protecting partial scientific outputs;
-use a new run ID instead.
+Options: `--tz ZONE` (default Brasília time), `--stale-minutes N`, `--no-color`.
 
 ## Configuration
 
-The YAML follows the notebook's parameter values. Standalone scripts have
-different defaults:
+`configs/simulations/zno_production.yaml` is the reference configuration. MD and NEB
+read their remaining settings from the run's `config.yaml`; CO₂RR reads its
+thermochemistry from the `--config` file. The CLI defaults of the standalone DFT,
+CO₂RR, MD and NEB scripts equal the YAML (checked by tests), except that a standalone
+`run_md.py` without `--seeds` and outside a run directory runs seed 1234 only.
 
-| Setting | Standalone default | Notebook / YAML |
-| --- | --- | --- |
-| DFT steps | 160 | 180 |
-| CO₂RR force threshold / steps | 0.06 / 220 | 0.05 / 260 |
-| MD steps / log interval | 500 / 10 | 2000 / 20 |
-| MD cutoff / k-points | 350 eV / 2×2×1 | 500 eV / 3×3×1 |
-| NEB internal images / steps | 3 / 120 | 5 / 300 |
-| NEB cutoff / k-points | 350 eV / 2×2×1 | 500 eV / 3×3×1 |
+| Setting | Value |
+| --- | --- |
+| Cutoff / k-points (periodic methods) | 500 eV / 2×3×1 |
+| DFT | BFGS, fmax 0.05 eV/Å, 180 steps + 1 continued block |
+| TDDFT (isolated CO₂ in its adsorbed geometry, no slab) | fd, h = 0.25 Å, 18 Å box, 68 converged + 8 buffer bands, `jend` = last converged band, 30 eV window, bright if f >= 0.001 |
+| CO₂RR | fmax 0.05 eV/Å, 260 steps; vibrations on, 298.15 K, 0 V vs RHE |
+| MD | Langevin, 300 K, 1 fs, friction 0.01 fs⁻¹, 500 equilibration + 1500 production steps, log every 20 steps, seeds 1234, 2345, 3456 |
+| NEB | 3 internal images, idpp, FIRE, 300 steps; plain NEB to fmax 0.08, then 0.05 eV/Å; pairs top_metal–bridge, bridge–top_oxygen |
+| MPI | 6 processes, `OMP_NUM_THREADS=1` |
 
-Select the settings associated with the experiment being reproduced. Process
-completion alone does not establish optimizer or electronic convergence; inspect
-the calculation logs before using the outputs.
+- MD: equilibration frames are written separately and never used for descriptors.
+  Each seed is an independent trajectory, `md/<material>/<site>/seed_<n>/`.
+- NEB: the second phase climbs only when an internal image is above both endpoints;
+  otherwise the plain NEB continues. Barriers <= 0.03 eV (`barrier_resolution_ev`)
+  are reported as not resolved. With 6 processes each image gets 2 ranks.
+- CO₂RR free energies are stored as computed (variant a).
+  `python -m scripts.analysis.co2rr_corrections --results-dir results/simulations/<run-id>`
+  writes `co2rr_corrected_summary.csv` with variants b (quasi-harmonic floor) and
+  c (b + PBE gas corrections CO₂ +0.19 eV, CO -0.24 eV); the analyses use variant c
+  when that file exists.
+
+A finished process does not prove optimizer or SCF convergence; check the method logs
+before using the outputs.

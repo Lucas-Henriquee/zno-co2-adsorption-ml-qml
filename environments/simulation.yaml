@@ -1,3 +1,7 @@
+# GPAW/ASE/MPI environment for run_simulations.sh and the notebooks. It also has the
+# analysis packages, so QML_ZNO_ANALYSIS_ENV may point at it.
+# Solves on linux-64, linux-aarch64 and osx-64. GPAW 25.7 has no osx-arm64 build:
+# on Apple Silicon setup_environment.sh builds it from osx-64 (CONDA_SUBDIR=osx-64).
 name: qml-zno-simulation
 
 channels:
@@ -5,31 +9,37 @@ channels:
   - nodefaults
 
 dependencies:
-  # Reproducible first-principles stack used by the most recent ZnO runs.
   - python=3.10.*
-  # Upper bound: run_tddft.py needs the legacy GPAW calculator for LrTDDFT
-  # (legacy_gpaw=True is passed when supported); stay below 26.7 until that is verified.
+  # 25.7 is the production version. run_tddft.py needs the legacy calculator for
+  # LrTDDFT (legacy_gpaw=True is passed when supported); 26.7 is not yet verified.
   - gpaw=25.7.*=*mpi_openmpi_omp*
   - gpaw-data=1.0.*
+  # >= 3.23 for ase.mep; run_neb.py relies on NEB.energies as in 3.28/3.29.
   - ase=3.28.*
   - numpy=2.2.*
   - scipy=1.15.*
-  - libxc=7.0.*
+  # cpu_* keeps the solver from picking a CUDA libxc build.
+  - libxc=7.0.*=cpu_*
 
-  # Parallel numerical libraries.
+  # Parallel numerical libraries (the launchers run mpiexec ... gpaw python).
   - mpi=1.0=openmpi
   - openmpi=5.0.*
-  - mpi4py
   - scalapack=2.2.*
   - fftw=3.3.*=mpi_openmpi_*
   - elpa
   - libvdwxc
 
-  # Notebook, configuration, and local analysis support.
+  # Configurations, tables and figures.
   - pyyaml=6.0.*
   - pandas=2.3.*
   - matplotlib=3.10.*
+
+  # Notebooks (interactive and notebooks/run_zno_notebook.sh).
   - jupyterlab=4.*
   - nbconvert=7.*
   - nbclient=0.10.*
   - ipykernel
+
+  # Test suite (tests/ imports pytest and scikit-learn).
+  - pytest>=8
+  - scikit-learn=1.6.*

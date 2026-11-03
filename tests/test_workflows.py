@@ -131,39 +131,33 @@ class OrganizationTests(unittest.TestCase):
                 with self.subTest(method=method), patch.object(sys, "argv", [command[2], *command[3:]]):
                     module.parse_args()
 
-    def test_yaml_preserves_notebook_numeric_parameters(self):
+    def test_notebook_runs_the_workflow_with_the_yaml(self):
+        """The notebook drives run_simulations with the reference YAML; it holds no method settings."""
         notebook = json.loads((ROOT / "notebooks/zno-co2-lucas.ipynb").read_text())
         values = {}
+        sources = []
         for cell in notebook["cells"]:
             if cell["cell_type"] != "code":
                 continue
-            for node in ast.parse("".join(cell["source"])).body:
+            source = "".join(cell["source"])
+            sources.append(source)
+            for node in ast.parse(source).body:
                 if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
                     try:
                         values[node.targets[0].id] = ast.literal_eval(node.value)
                     except (ValueError, TypeError):
                         pass
+        code = "\n".join(sources)
         config = yaml.safe_load((ROOT / "configs/simulations/zno_production.yaml").read_text())
-        mapping = {
-            "dft": {"max_steps": "DFT_STEPS", "ecut_ev": "DFT_ECUT", "kpoints": "DFT_KPTS", "fmax_ev_per_angstrom": "DFT_FMAX"},
-            "co2rr": {"max_steps": "PATHWAY_STEPS", "fmax_ev_per_angstrom": "PATHWAY_FMAX"},
-            "tddft": {"max_transitions": "TDDFT_MAX_TRANSITIONS", "oscillator_strength_threshold": "TDDFT_OSC_THRESHOLD"},
-            "md": {"steps": "MD_STEPS", "ecut_ev": "MD_ECUT", "kpoints": "MD_KPTS", "log_interval": "MD_LOG_INTERVAL", "timestep_fs": "MD_TIMESTEP_FS", "temperature_kelvin": "MD_TEMPERATURE_K"},
-            "neb": {"max_steps": "NEB_STEPS", "ecut_ev": "NEB_ECUT", "kpoints": "NEB_KPTS", "internal_images": "NEB_IMAGES", "fmax_ev_per_angstrom": "NEB_FMAX", "interpolation": "NEB_INTERPOLATION", "climb": "NEB_CLIMB", "parallel_images": "NEB_PARALLEL_IMAGES", "optimizer": "NEB_OPTIMIZER"},
-        }
-        for method, fields in mapping.items():
-            for field, variable in fields.items():
-                expected = values[variable]
-                if isinstance(expected, tuple):
-                    expected = list(expected)
-                self.assertEqual(config["methods"][method][field], expected, variable)
-        # The notebook's MPI_CORES = 10 does not divide the 6 k-points of the 2x1 cell
-        # (audit D11); the YAML deliberately uses 6 ranks.
-        self.assertEqual(values["MPI_CORES"], 10)
+        self.assertIn("scripts.workflows.run_simulations", code)
+        self.assertIn('"zno_production.yaml"', code)
+        self.assertNotIn("scripts.simulations.", code)
+        for stale in ("DFT_STEPS", "MD_STEPS", "NEB_FMAX", "MPI_CORES", "TDDFT_MAX_TRANSITIONS"):
+            self.assertNotIn(stale, values)
+        self.assertEqual(values["MPI_PROCESSES"], config["execution"]["mpi"]["processes"])
         self.assertEqual(config["execution"]["mpi"]["processes"], 6)
         self.assertNotIn("random_seed", config["methods"]["md"])
         self.assertEqual(config["execution"]["mpi"]["extra_args"], ["--mca", "btl", "self,vader"])
-
 
 if __name__ == "__main__":
     unittest.main()

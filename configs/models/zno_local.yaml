@@ -9,7 +9,7 @@ input:
   # Override with --dataset. Every row must carry 'group' (material/site/seed);
   # train/test and CV keep each trajectory on one side. The legacy
   # zno_existing_v1 dataset has no group column and is rejected.
-  dataset: data/generated/zno_production_datasets/multitech/md_window_unique_dataset.csv
+  dataset: data/generated/zno_ic_final_datasets/multitech/md_window_unique_dataset.csv
   label: label_site_id
   # Independent-trajectory column. Documentation only: run_benchmarks.py uses
   # --group-column, whose default is "group".

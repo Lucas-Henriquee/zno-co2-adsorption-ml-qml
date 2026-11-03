@@ -291,10 +291,11 @@ def figure_activation_scatter(rows: list[dict[str, str]], plt, Normalize, ticker
 def co2_onset(row: dict[str, str]) -> float:
     """First bright TDDFT excitation of the isolated CO2 (co2_isolated_first_bright_excitation_ev).
 
-    The older names co2_isolated_onset_ev and tddft_onset_ev are read as fallbacks. This
-    is not an absorption onset of the ZnO/CO2 system.
+    The older name co2_isolated_onset_ev is read as a fallback (the onset column of the
+    first campaign is not: it held Hartree values). This is not an absorption onset of the ZnO/CO2
+    system.
     """
-    for column in ("co2_isolated_first_bright_excitation_ev", "co2_isolated_onset_ev", "tddft_onset_ev"):
+    for column in ("co2_isolated_first_bright_excitation_ev", "co2_isolated_onset_ev"):
         value = row.get(column)
         if value not in (None, ""):
             return safe_float(value)

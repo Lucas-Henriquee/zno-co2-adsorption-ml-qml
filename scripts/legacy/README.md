@@ -1,16 +1,17 @@
-# Campaign-specific plotting
+# First-campaign scripts
 
-These implementations use fixed paths for earlier result sets:
+Kept for provenance only. They read fixed paths of the first campaign, whose results
+are invalid and now lie below `results/_invalid_ic_v1/`
+([README](../../results/_invalid_ic_v1/README.md)). Do not use them for new figures or
+runs; they are not part of `run_all.sh`.
 
-| Script | Inputs |
+| Script | Reads |
 | --- | --- |
-| `visualization/analysis_plot2.py` | Combined DFT, TDDFT, MD, CO₂RR, and `results/neb_iddp` analysis |
+| `visualization/analysis_plot2.py` | DFT, TDDFT, MD, CO₂RR summaries and `results/neb_iddp`; writes `results/my_analysis` |
 | `visualization/plot_md_comparison.py` | `results/my_analysis/md/ZnO` |
-| `visualization/plot_co2rr_pathway.py` | `results/my_analysis/co2rr_pathway_summary.csv` |
+| `visualization/plot_ml_results.py` | 17 first-campaign model run folders in `results/` |
+| `workflows/run_pipeline.py` | Flat `results/` layout of the first campaign |
 
-The corresponding paths in `scripts/visualization/` are compatibility wrappers.
-The DFT and optical plots in `analysis_plot2.py` include the manuscript styling
-changes. See [figure sources](../../docs/figures.md).
-
-These scripts are separate from `run_all.sh`. Historical directory spellings
-are retained because saved records refer to them.
+`analysis_plot2.py` also plots TDDFT energies in Hartree labelled as eV and |me| as the
+oscillator strength. The directory spellings are kept because saved records refer to
+them. Current producers: [docs/figures.md](../../docs/figures.md).

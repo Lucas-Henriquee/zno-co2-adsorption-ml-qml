@@ -1,12 +1,10 @@
 # Data
 
-- `geometries/`: structural inputs used by standalone scripts.
-- `generated/<run-id>/`: datasets produced by the dataset launcher.
-- `qml_datasets/tddft/`: saved TDDFT tables.
+| Path | Content |
+| --- | --- |
+| `geometries/ZnO/` | Starting structures: 2×1 ZnO(10-10) slab and CO₂ at `top_metal`, `top_oxygen`, `bridge`, plus the exploratory `carbonate` and `tridentate`; used by standalone scripts and as site references |
+| `generated/<run-id>/` | Dataset runs of `run_datasets.sh` ([layout](generated/README.md)) |
 
-Simulation-launcher runs keep their geometries inside the run directory.
-Dataset manifests record source files and hashes. Historical datasets also
-remain under `results/datasets/`, where existing experiment records reference them.
-
-See [dataset generation](../docs/datasets.md) and
-[feature definitions](../docs/datasets_reference.md).
+Workflow simulation runs build their own geometries inside the run directory
+(`data/geometries/`). First-campaign datasets and TDDFT tables are archived, invalid,
+in `results/_invalid_ic_v1/`. Dataset generation: [docs/datasets.md](../docs/datasets.md).

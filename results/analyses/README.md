@@ -1,6 +1,6 @@
-# Isolated Analysis Runs
+# Analysis runs
 
-Each subdirectory is produced by `scripts/workflows/run_analysis.sh`.
+One directory per run of `./run_analysis.sh`.
 
 ```text
 <run-id>/
@@ -16,8 +16,6 @@ Each subdirectory is produced by `scripts/workflows/run_analysis.sh`.
     └── figures/
 ```
 
-Generated analysis directories are excluded from Git. This README documents the
-layout while existing historical analyses remain unchanged.
-
-See [the verification report](../../docs/validation.md) for tested runs.
-Older numbered runs are retained with their original manifests.
+Method directories exist only for the selected methods. Run directories are ignored by
+Git. Analyses made before the 2026-10 audit read the invalid first campaign; keep them,
+if at all, in `results/_local_archive_pre_audit/`.

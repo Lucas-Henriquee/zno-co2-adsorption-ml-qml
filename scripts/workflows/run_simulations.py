@@ -19,6 +19,7 @@ from typing import Any
 import yaml
 
 from scripts.common.project_config import DFT_SITES, EXPLORATORY_SITES
+from scripts.workflows.active_environment import active_environment
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -56,7 +57,13 @@ def parse_args() -> argparse.Namespace:
         nargs="*",
         help="One or more methods, or 'all'. Available: geometry, dft, tddft, co2rr, md, neb.",
     )
-    parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=None,
+        help="Configuration YAML (default: configs/simulations/zno_production.yaml; with --resume, "
+        "the run's own config.yaml snapshot, whose hash the manifest checks).",
+    )
     parser.add_argument("--run-id", help="Safe directory name for this isolated run.")
     parser.add_argument(
         "--resume",
@@ -87,6 +94,28 @@ def parse_args() -> argparse.Namespace:
 
 def fail(message: str) -> None:
     raise SystemExit(f"[error] {message}")
+
+
+def select_config_path(args: argparse.Namespace) -> Path:
+    """--config if given; when resuming without it, the run's config.yaml snapshot.
+
+    Resume refuses a configuration whose file hash differs from the one recorded at the
+    start of the run, so after any later edit of the reference YAML (even a comment) a
+    run can only be continued from its own snapshot.
+    """
+    if args.config is not None:
+        return args.config
+    if args.resume and args.run_id:
+        reference = load_config(DEFAULT_CONFIG)
+        output = reference.get("output") if isinstance(reference.get("output"), dict) else {}
+        root = Path(str(output.get("root", "results/simulations"))).expanduser()
+        if not root.is_absolute():
+            root = PROJECT_ROOT / root
+        snapshot = root / str(args.run_id) / "config.yaml"
+        if snapshot.is_file():
+            print(f"[plan] resuming with the run's configuration snapshot: {snapshot}")
+            return snapshot
+    return DEFAULT_CONFIG
 
 
 def load_config(path: Path) -> dict[str, Any]:
@@ -456,7 +485,7 @@ def main() -> None:
         print("\n".join(METHOD_ORDER))
         return
 
-    config = load_config(args.config)
+    config = load_config(select_config_path(args))
     if args.resume and not args.run_id:
         fail("--resume requires an explicit --run-id.")
     selected_methods = normalize_methods(args.methods)
@@ -471,7 +500,7 @@ def main() -> None:
 
     execution = require_mapping(config, "execution")
     configured_environment = str(execution.get("environment", "qml-zno-simulation"))
-    environment_name = os.environ.get("QML_ZNO_ACTIVE_ENVIRONMENT", configured_environment)
+    environment_name = active_environment(configured_environment)
     omp_threads = int(execution.get("omp_num_threads", 1))
     if omp_threads <= 0:
         fail("execution.omp_num_threads must be positive.")
@@ -530,7 +559,10 @@ def main() -> None:
 
     if args.resume:
         if not manifest_path.is_file():
-            fail(f"Cannot resume because the manifest does not exist: {manifest_path}")
+            fail(
+                f"Cannot resume because the manifest does not exist: {manifest_path}. "
+                "For a run below another output root, pass --config <run directory>/config.yaml."
+            )
         with manifest_path.open("r", encoding="utf-8") as handle:
             manifest = json.load(handle)
         immutable_context = {
@@ -542,11 +574,16 @@ def main() -> None:
             "mpi_processes": mpi_processes,
             "omp_num_threads": omp_threads,
         }
+        hints = {
+            "config_sha256": f" Omit --config, or pass the run's own snapshot {run_dir / 'config.yaml'}.",
+            "environment": " Run in the environment the run was started in, or set "
+            "QML_ZNO_ACTIVE_ENVIRONMENT to the recorded name if it is the same environment.",
+        }
         for key, expected in immutable_context.items():
             if manifest.get(key) != expected:
                 fail(
                     f"Cannot resume with a different {key}. "
-                    f"Existing={manifest.get(key)!r}, requested={expected!r}."
+                    f"Existing={manifest.get(key)!r}, requested={expected!r}.{hints.get(key, '')}"
                 )
         previous_selected = [str(item) for item in manifest.get("selected_methods", [])]
         previous_resolved = [str(item) for item in manifest.get("resolved_methods", [])]

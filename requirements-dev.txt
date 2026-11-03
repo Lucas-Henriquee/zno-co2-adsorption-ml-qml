@@ -1,0 +1,7 @@
+# Test suite without GPAW and Qiskit (GPAW and Qiskit tests skip or use stubs).
+#   python -m pip install -r requirements-dev.txt
+#   python -m pytest tests
+-r requirements.txt
+scikit-learn>=1.2
+joblib>=1.2
+pytest>=8

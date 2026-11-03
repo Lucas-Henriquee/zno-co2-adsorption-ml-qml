@@ -172,5 +172,48 @@ class RetryFailedTests(unittest.TestCase):
                 simulations.main()
 
 
+
+class ResumeContextTests(unittest.TestCase):
+    """A run started with the launcher can be continued from a notebook kernel and vice versa."""
+
+    def test_resume_without_config_uses_the_run_snapshot(self):
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp)
+        (tmp / "configs/simulations").mkdir(parents=True)
+        shutil.copy(PRODUCTION, tmp / "configs/simulations/zno_production.yaml")
+        snapshot = tmp / "results/simulations/r1/config.yaml"
+        snapshot.parent.mkdir(parents=True)
+        shutil.copy(PRODUCTION, snapshot)
+        default = tmp / "configs/simulations/zno_production.yaml"
+        with mock.patch.object(simulations, "PROJECT_ROOT", tmp), \
+                mock.patch.object(simulations, "DEFAULT_CONFIG", default), \
+                contextlib.redirect_stdout(io.StringIO()):
+            pick = simulations.select_config_path
+            resume = mock.Mock(config=None, resume=True, run_id="r1")
+            self.assertEqual(pick(resume), snapshot)
+            self.assertEqual(pick(mock.Mock(config=None, resume=False, run_id="r1")), default)
+            self.assertEqual(pick(mock.Mock(config=None, resume=True, run_id="other")), default)
+            explicit = tmp / "x.yaml"
+            self.assertEqual(pick(mock.Mock(config=explicit, resume=True, run_id="r1")), explicit)
+
+    def test_recorded_environment(self):
+        from scripts.workflows.active_environment import active_environment
+
+        with mock.patch.dict("os.environ", {"QML_ZNO_ACTIVE_ENVIRONMENT": "gpaw-dft"}):
+            self.assertEqual(active_environment("qml-zno-simulation"), "gpaw-dft")
+        with mock.patch.dict("os.environ", {"QML_ZNO_ACTIVE_ENVIRONMENT": "", "CONDA_DEFAULT_ENV": "base"}), \
+                mock.patch.object(sys, "prefix", "/home/u/miniconda3/envs/gpaw-dft"):
+            self.assertEqual(active_environment("qml-zno-simulation"), "gpaw-dft")
+        with mock.patch.dict("os.environ", {"QML_ZNO_ACTIVE_ENVIRONMENT": "", "CONDA_DEFAULT_ENV": ""}), \
+                mock.patch.object(sys, "prefix", "/usr"):
+            self.assertEqual(active_environment("qml-zno-simulation"), "qml-zno-simulation")
+        # A prefix path is recorded by its last component on every route.
+        with mock.patch.dict("os.environ", {"QML_ZNO_ACTIVE_ENVIRONMENT": "/data/envs/x/myprefix/"}):
+            self.assertEqual(active_environment("qml-zno-simulation"), "myprefix")
+        with mock.patch.dict("os.environ", {"QML_ZNO_ACTIVE_ENVIRONMENT": "", "CONDA_DEFAULT_ENV": "/opt/other/myprefix"}), \
+                mock.patch.object(sys, "prefix", "/opt/other/myprefix"):
+            self.assertEqual(active_environment("qml-zno-simulation"), "myprefix")
+
+
 if __name__ == "__main__":
     unittest.main()

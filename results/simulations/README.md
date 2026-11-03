@@ -1,25 +1,24 @@
-# Isolated Simulation Runs
+# Simulation runs
 
-Each directory here is created by `scripts/workflows/run_simulations.sh` and is
-identified by a unique run ID.
+One directory per run of `./run_simulations.sh` (or
+`python -m scripts.workflows.run_simulations`, also used by
+`notebooks/zno-co2-lucas.ipynb`). Progress:
+`python -m scripts.workflows.run_status <run-id>`.
 
 ```text
 <run-id>/
-├── config.yaml             # configuration snapshot used by the run
-├── run_manifest.json       # commands, versions, paths, timestamps, and status
-├── logs/                   # one combined log per method
-├── data/geometries/        # run-specific structural inputs
+├── config.yaml             # configuration snapshot
+├── run_manifest.json       # commands, hash, environment, versions, status, timestamps
+├── logs/                   # one log per method
+├── data/geometries/        # run-specific starting structures
 ├── dft/
 ├── tddft/
-├── pathways/
-├── md/
-└── neb/
+├── pathways/               # CO2RR
+├── md/<material>/<site>/seed_<n>/
+├── neb/
+└── failed_attempts/        # only after --resume --retry-failed
 ```
 
-Some method directories appear only when that method is selected. Generated run
-directories are intentionally excluded from Git because GPAW outputs can be very
-large. This README remains tracked so the output convention is documented.
-
-Never manually combine files from runs with different configuration hashes.
-Use the manifest to associate outputs with their exact inputs and commands.
-
+Method directories exist only for the selected methods. Run directories are ignored by
+Git (GPAW outputs are large). Do not combine files of runs with different configuration
+hashes.

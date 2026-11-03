@@ -1,5 +1,13 @@
 # Dataset and feature reference
 
+> Out of date: describes the first-campaign datasets, including TDDFT and CO₂RR
+> feature groups that are no longer ML features (TDDFT is a reference only; the CO₂RR
+> columns are now free energies). Current sources:
+> `scripts/datasets/prepare_multitech_dataset.py`,
+> [configs/datasets/README.md](../configs/datasets/README.md) and the feature sets in
+> [configs/models/README.md](../configs/models/README.md). To be rewritten with the
+> ML/QML review.
+
 Source definitions: `scripts/datasets/prepare_multitech_dataset.py` and
 `scripts/models/benchmarks/run_benchmarks.py`. These names describe locally
 constructed data and feature subsets, not externally standardized datasets.

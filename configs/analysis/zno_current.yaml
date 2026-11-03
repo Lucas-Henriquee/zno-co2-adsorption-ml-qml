@@ -9,7 +9,9 @@ input:
   # (results/models/<run-id>). Replace the run IDs or override them with
   # --scientific-results and --model-run. The legacy results/ tree and
   # results/models/zno_md3_local_v1 are invalid (wrong geometry, leaking dataset).
-  scientific_results: results/simulations/zno_production
+  scientific_results: results/simulations/zno_ic_final
+  # No valid model run exists yet (the ML phase reruns on the zno_ic_final datasets);
+  # pass --model-run for the models stage.
   model_run: results/models/zno_md_grouped_local
 
 output:

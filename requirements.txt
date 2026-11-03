@@ -1,4 +1,10 @@
-ase>=3.23
-gpaw>=24.6.0,<26.7
-matplotlib>=3.8
-numpy>=1.26
+# pip subset without GPAW/MPI: analyses, figures, datasets, run_status and the analysis
+# notebook (Python 3.10-3.13). Simulations need GPAW with MPI: use environments/simulation.yaml.
+#   python -m pip install -r requirements.txt
+numpy>=1.26,<3
+scipy>=1.11
+pandas>=2.1,<3
+matplotlib>=3.8,<4
+PyYAML>=6.0,<7
+# >= 3.23 for ase.mep and the MD APIs; < 3.30 until NEB.energies is re-verified.
+ase>=3.23,<3.30

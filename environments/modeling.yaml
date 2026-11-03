@@ -1,3 +1,6 @@
+# Datasets, analyses, classical ML, local QML and IBM Runtime (run_datasets.sh,
+# run_analysis.sh, run_models.sh, run_all.sh). No GPAW. Solves on Linux, macOS
+# (Intel and Apple Silicon) and Windows; the launchers need bash (WSL on Windows).
 name: qml-zno-modeling
 
 channels:
@@ -5,21 +8,26 @@ channels:
   - nodefaults
 
 dependencies:
-  # Shared dataset, analysis, and classical ML stack.
   - python=3.10.*
   - numpy=2.1.*
+  # qiskit-machine-learning 0.8.4 requires scipy < 1.16.
   - scipy=1.15.*
   - pandas=2.2.*
   - scikit-learn=1.6.1
+  - joblib
   - matplotlib=3.10.*
   - pyyaml=6.0.*
+  # CO2RR corrections, CO2 reference geometries, structure figures, run_status.
+  - ase=3.28.*
   - jupyterlab=4.*
   - nbconvert=7.*
   - nbclient=0.10.*
   - ipykernel
+  - pytest>=8
   - pip
 
   # These versions reproduce the QML and IBM runs recorded in results/.
+  # qiskit-machine-learning 0.8.4 requires qiskit < 2.
   - pip:
       - qiskit==1.4.6
       - qiskit-aer==0.17.2

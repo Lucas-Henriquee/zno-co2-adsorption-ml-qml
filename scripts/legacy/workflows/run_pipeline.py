@@ -1,3 +1,6 @@
+"""Superseded flat-layout pipeline (writes into the shared results/ tree, which held the
+invalid first campaign). Kept for provenance; use scripts.workflows.run_simulations.
+"""
 from __future__ import annotations
 
 import argparse
@@ -6,7 +9,7 @@ import sys
 from pathlib import Path
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
 PIPELINE_MODULES = {
     "geometry": "scripts.simulations.dft.build_geometries",

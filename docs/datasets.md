@@ -1,36 +1,43 @@
-# Dataset Generation
+# Datasets
 
-See [dataset and feature definitions](datasets_reference.md), including `static6`,
-and [reproduction](reproduction.md) for input/output routing across stages.
-
-Use the dedicated dataset runner from the project root:
+`run_datasets.sh` builds datasets from one simulation run into
+`data/generated/<run-id>/`. Configuration: `configs/datasets/zno_existing_results.yaml`;
+inputs, outputs and block selection: [configs/datasets/README.md](../configs/datasets/README.md).
 
 ```bash
-./run_datasets.sh all --dry-run
-./run_datasets.sh all
-./run_datasets.sh tddft multitech --run-id zno_descriptors_v1
-./run_datasets.sh qml_features --run-id zno_qml_features_v1
+RUN=results/simulations/<run-id>
+./run_datasets.sh tddft multitech --source-results $RUN --dry-run
+./run_datasets.sh tddft multitech --source-results $RUN --run-id zno_descriptors_01
+./run_datasets.sh qml_features --source-results $RUN \
+  --ranking results/analyses/<analysis-run>/science/screening/ranked_candidates.csv \
+  --run-id zno_qml_features_01
+./run_datasets.sh all --source-results $RUN \
+  --ranking results/analyses/<analysis-run>/science/screening/ranked_candidates.csv
 ```
 
-The three methods are independent:
+| Option | Effect |
+| --- | --- |
+| `--source-results DIR` | Simulation run (default `input.results_dir`, `results/simulations/zno_ic_final`) |
+| `--ranking FILE` | Ranked candidate table for `qml_features` (default `<run>/analysis/ranked_candidates.csv`) |
+| `--config PATH` | Other YAML |
+| `--run-id NAME` | Run directory name; default next `dataset_NN`; never reused |
+| `--dry-run` | Validate inputs and print the commands |
+| `--list-methods` | Print the methods |
 
-- `tddft` creates summary-level and transition-level TDDFT datasets.
-- `multitech` combines DFT, TDDFT, CO2RR, and MD descriptors.
-- `qml_features` normalizes a ranked candidate table for QML models.
+| Method | Output |
+| --- | --- |
+| `tddft` | Summary- and transition-level TDDFT reference tables (isolated CO₂, no features) |
+| `multitech` | DFT summary (with CO₂RR, MD and TDDFT reference columns), MD-window and MD-trajectory datasets |
+| `qml_features` | Ranked DFT table normalized for QML; needs the ranking written by `./run_analysis.sh science` |
 
-Every run is written below `data/generated/<run-id>/`. The manifest records the
-SHA-256 hash of every consumed input, the exact commands, package versions, and
-method status. Existing datasets and simulation results are read-only inputs.
+- `all` includes `qml_features`, so it fails without a ranking file.
+- MD input: `md/<material>/<site>/md_production_frames.csv` (all seeds,
+  `phase == production` rows only).
+- The MD-window dataset has one row per block of production frames and a `group`
+  column (`material/site/seed_<n>`). Windows of one trajectory are correlated; the model
+  configurations split and validate by trajectory.
+- The manifest records the SHA-256 of every input, the commands, package versions and
+  method status. Simulation outputs are read only.
 
-The expanded multitech table pairs TDDFT transitions with MD windows from the
-same material/site. The unique-window dataset keeps one row per window.
-Windows from a single trajectory may remain correlated; the supplied model
-configuration uses its recorded stratified split and does not claim independent
-trajectory validation.
-
-MD collection accepts both `md_summary.csv` and historical `md_summary_*.csv`
-names. There must be one matching file per material/site directory. Ambiguous
-inputs are reported instead of combining or choosing trajectories implicitly.
-
-Use `--source-results` to consume a specific isolated simulation run and
-`--ranking` to select its ranked candidate table. A run ID cannot be reused.
+Column definitions: [datasets_reference.md](datasets_reference.md) (out of date; the
+reference is `scripts/datasets/prepare_multitech_dataset.py`).

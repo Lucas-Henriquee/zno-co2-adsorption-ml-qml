@@ -17,6 +17,7 @@ from typing import Any
 
 import yaml
 from scripts.common.md_inputs import find_md_summaries
+from scripts.workflows.active_environment import active_environment
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -395,10 +396,7 @@ def main() -> None:
 
     all_inputs = list(dict.fromkeys(path for paths in inputs_by_method.values() for path in paths))
     execution = require_mapping(config, "execution")
-    environment_name = os.environ.get(
-        "QML_ZNO_ACTIVE_ENVIRONMENT",
-        str(execution.get("environment", "qml-zno-modeling")),
-    )
+    environment_name = active_environment(str(execution.get("environment", "qml-zno-modeling")))
     manifest_path = run_dir / "run_manifest.json"
     manifest: dict[str, Any] = {
         "schema_version": 1,

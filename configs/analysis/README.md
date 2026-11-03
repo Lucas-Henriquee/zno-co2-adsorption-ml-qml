@@ -1,24 +1,19 @@
-# Analysis Configuration
+# Analysis configuration
 
-`zno_current.yaml` connects one simulation run (`results/simulations/<run-id>`)
-and one model run (`results/models/<run-id>`). Analysis output is always
-written to a new directory below `results/analyses/`.
+`zno_current.yaml` connects one simulation run and one model run; output goes to a new
+directory below `results/analyses/`. Commands: [docs/analysis.md](../../docs/analysis.md).
 
-Input roots can be overridden without editing YAML:
+| Key | Value |
+| --- | --- |
+| `input.scientific_results` | `results/simulations/zno_ic_final` (`--scientific-results`) |
+| `input.model_run` | `results/models/zno_md_grouped_local` (`--model-run`); no valid model run exists yet |
+| `methods.co2_reduction.require_pathway_results` | `true` |
+| `methods.science_figures.dpi` / `methods.model_analysis.dpi` | 600 / 300 |
 
-```bash
-./run_analysis.sh all \
-  --scientific-results results/simulations/zno_run_01 \
-  --model-run results/models/another_local_run \
-  --run-id another_analysis
-```
-
-The screening step ranks only successful DFT rows (`dft_status == ok`, carbonate
-excluded) by adsorption energy. Band gaps are PBE Kohn-Sham gaps
-(`*_band_gap_gamma_ev`) and the TDDFT values describe the isolated CO2 molecule;
-both are reported for information and are not compared with photocatalysis
-targets.
-
-The scientific and model analyses remain separate. A missing model run does not
-prevent a science-only execution, and model analysis does not modify simulation
-outputs.
+- Screening ranks successful DFT rows (`dft_status == ok`, carbonate excluded) by
+  adsorption energy. No composite score.
+- Band gaps are PBE Kohn-Sham gaps (`*_band_gap_gamma_ev`); TDDFT values describe the
+  isolated CO₂. Both are reported for information only, not compared with
+  photocatalysis targets.
+- Science and model analyses are independent: a missing model run does not block
+  `science`.

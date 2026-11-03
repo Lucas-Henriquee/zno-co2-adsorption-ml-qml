@@ -10,7 +10,7 @@ input:
   # Simulation run directory: results/simulations/<run-id>. Replace the run ID
   # here or pass --source-results results/simulations/<run-id>. The legacy
   # results/ tree was produced with a wrong geometry and must not be used.
-  results_dir: results/simulations/zno_production
+  results_dir: results/simulations/zno_ic_final
   # Relative input paths are resolved below results_dir.
   tddft_summary: tddft_summary.csv
   tddft_directory: tddft

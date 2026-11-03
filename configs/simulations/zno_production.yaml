@@ -122,7 +122,8 @@ methods:
 
   neb:
     internal_images: 3
-    # Plain-NEB phase; the climbing-image phase always follows with fmax_ci.
+    # Plain-NEB phase. The second phase (to fmax_ci) is a climbing image only when an
+    # internal image is above both endpoints; otherwise the plain NEB continues.
     fmax_ev_per_angstrom: 0.08
     fmax_ci_ev_per_angstrom: 0.05
     # Total step budget; climb_start_fraction of it goes to the plain phase.

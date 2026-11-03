@@ -1,98 +1,77 @@
 # Manual testing
 
-Run from the repository root. These commands use the supplied configurations
-without changing parameters. Use a new run ID or output directory for each
-execution; existing outputs are not overwritten.
+Checks from the repository root, in increasing cost. Every executed step needs a new
+run ID; existing run directories are never overwritten. Environment selection:
+[environments/README.md](../environments/README.md).
 
-## 1. Environments and regression tests
+## 1. Environments and unit tests
 
 ```bash
-cd /home/lucas/Documents/GitHub_Repository/QML_ZnO
 ./scripts/environment/check_environment.sh simulation --mpi
 ./scripts/environment/check_environment.sh modeling
-conda run --no-capture-output -n qml-zno-simulation python -m unittest discover -s tests -v
+python -m pytest tests -q          # inside an environment with pytest
 ```
 
-Environment checks should finish without errors; the test suite should report
-`OK`. The MPI check initializes GPAW in dry-run mode, not a production calculation.
-If an environment is missing, install it with
-`./scripts/environment/setup_environment.sh all`, then repeat the checks.
+The checks must end without `[error]`; the tests must pass. The MPI check initializes
+GPAW in dry-run mode only.
 
 ## 2. Validate commands and inputs
 
 ```bash
+RUN=results/simulations/<run-id>
+DATASET=data/generated/<dataset-run-id>/multitech/md_window_unique_dataset.csv
 ./run_simulations.sh all --dry-run
-./run_datasets.sh all --dry-run
-./run_models.sh local --dry-run
-./run_models.sh ibm-plan --config configs/models/zno_ibm_plan.yaml --dry-run
-./run_analysis.sh all --dry-run
+./run_analysis.sh science --scientific-results $RUN --dry-run
+./run_datasets.sh tddft multitech --source-results $RUN --dry-run
+./run_models.sh local --dataset $DATASET --dry-run
+./run_models.sh ibm-plan --config configs/models/zno_ibm_plan.yaml --dataset $DATASET --dry-run
 ```
 
-Every command should report successful validation. These checks do not execute
-simulations, train models, or submit hardware jobs.
+Each command must end with `[dry-run] Validation completed`. The downstream commands
+need a finished simulation run and, for the models, a dataset run. `qml_features` (part
+of `run_datasets.sh all`) also needs `--ranking` from an executed science analysis.
+Nothing is simulated, trained or submitted.
 
-## 3. Execute the local workflow using saved simulation outputs
-
-Preview the combined workflow:
+## 3. Local workflow on a saved simulation run
 
 ```bash
 ./run_all.sh --run-id manual_local_01 \
-  --source-results results \
+  --source-results $RUN \
   --dataset-config configs/datasets/zno_existing_results.yaml \
   --model-config configs/models/zno_local.yaml \
   --analysis-config configs/analysis/zno_current.yaml \
   --model-dataset multitech/md_window_unique_dataset.csv \
-  --dry-run
+  --dry-run                        # then the same command with --execute
 ```
 
-Then execute the same workflow:
+Produces science tables, datasets, SVM/QSVM results and model figures.
+`results/workflows/manual_local_01/run_manifest.json` must report `completed`; on
+`failed`, read the stage logs in the same directory.
+
+## 4. IBM plan
 
 ```bash
-./run_all.sh --run-id manual_local_01 \
-  --source-results results \
-  --dataset-config configs/datasets/zno_existing_results.yaml \
-  --model-config configs/models/zno_local.yaml \
-  --analysis-config configs/analysis/zno_current.yaml \
-  --model-dataset multitech/md_window_unique_dataset.csv \
-  --execute
+./run_models.sh ibm-plan --config configs/models/zno_ibm_plan.yaml \
+  --dataset data/generated/manual_local_01/multitech/md_window_unique_dataset.csv \
+  --run-id manual_ibm_plan_01
 ```
 
-This generates scientific tables, datasets, SVM/QSVM results, and model figures.
-It does not repeat physical simulations or IBM measurements. Check that
-`results/workflows/manual_local_01/run_manifest.json` reports `completed`.
-Consult the stage logs if it reports `failed`.
+Needs no account and does not validate hardware access. Real submission:
+[models.md](models.md).
 
-## 4. Test figure and circuit generation from saved experiments
+## 5. Simulations
+
+Runs every method at the production settings; MD and NEB can run for days.
 
 ```bash
-conda run --no-capture-output -n qml-zno-modeling python -m scripts.visualization.benchmarks.render_saved_figures \
-  --output-dir results/analyses/manual_benchmark_figures_01
-conda run --no-capture-output -n qml-zno-modeling python -m scripts.visualization.benchmarks.export_paper_circuits \
-  --output-dir results/analyses/manual_circuits_01
-./run_models.sh ibm-plan --config configs/models/zno_ibm_plan.yaml --run-id manual_ibm_plan_01
+./run_simulations.sh all --run-id manual_simulation_01
 ```
 
-Inspect the generated images. IBM planning requires no account or submission;
-it does not validate hardware access. Real IBM execution is described separately
-in [the model guide](models.md).
+Check `results/simulations/manual_simulation_01/run_manifest.json` and the method logs.
+A completed process is not proof of SCF or optimizer convergence; review the
+convergence messages, MD outputs and NEB paths. To test downstream processing on this
+run, repeat section 3 with `--source-results results/simulations/manual_simulation_01`
+and a new run ID.
 
-## 5. Run physical simulations
-
-This is the expensive test: it launches all configured methods at their original
-settings. It can take substantially longer than the checks above.
-
-```bash
-./run_simulations.sh all --config configs/simulations/zno_production.yaml --run-id manual_simulation_01
-```
-
-Check `results/simulations/manual_simulation_01/run_manifest.json` and the method
-logs. A successful process is not proof of electronic or optimizer convergence.
-Review convergence messages, MD outputs, and NEB paths before using new results.
-
-To test downstream processing with that new campaign, repeat the command in
-section 3 with `--source-results results/simulations/manual_simulation_01` and
-a new run ID, such as `manual_new_campaign_01`.
-
-The local model profile is not identical to every selected manuscript experiment.
-These tests verify the configured workflow, not full reproduction of all published
-comparisons. See [reproduction](reproduction.md).
+These steps test the configured workflow, not the reproduction of every published
+comparison ([reproduction.md](reproduction.md)).
