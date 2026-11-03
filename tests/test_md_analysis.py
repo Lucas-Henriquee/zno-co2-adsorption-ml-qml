@@ -306,3 +306,24 @@ def test_configured_sites_fallbacks():
     assert mta.configured_sites({}) == list(mta.SITE_TYPES)
     assert mta.configured_sites({"selection": {"sites": ["bridge", "carbonate"]}}) == ["bridge"]
     assert mta.configured_sites({"methods": {"dft": {"sites": ["top_oxygen"]}}}) == ["top_oxygen"]
+
+
+def test_output_dir_holds_run_level_files_and_frames_stay_in_the_run(tmp_path, slab, model):
+    root = make_run(tmp_path / "run", slab, model)
+    out = tmp_path / "analysis" / "science" / "md"
+    before = {path for path in tmp_path.rglob("*") if path.is_file()}
+    assert mta.main(["--results-dir", str(root), "--output-dir", str(out), "--log-interval", "20",
+                     "--timestep-fs", "1.0"]) == 0
+    created = {path for path in tmp_path.rglob("*") if path.is_file()} - before
+    in_out = {path.relative_to(out) for path in created if out in path.parents}
+    in_run = {path.relative_to(root) for path in created if root in path.parents}
+    assert created == {out / path for path in in_out} | {root / path for path in in_run}
+    expected_out = {Path(mta.SUMMARY_FILENAME), Path(mta.SENSITIVITY_FILENAME)}
+    import importlib.util
+
+    if importlib.util.find_spec("matplotlib") is not None:
+        expected_out.add(Path("md") / "ZnO" / mta.PLOT_FILENAME)
+    assert in_out == expected_out
+    assert in_run == {Path("md/ZnO/top_metal") / mta.FRAME_ANALYSIS_FILENAME,
+                      Path("md/ZnO/bridge") / mta.FRAME_ANALYSIS_FILENAME}
+    assert not (root / mta.SUMMARY_FILENAME).exists()

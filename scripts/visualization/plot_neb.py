@@ -66,6 +66,14 @@ def parse_args(argv=None):
     )
 
     parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=None,
+        help="Directory for the tables, migration_barrier_comparison.png and "
+             "individual_profiles/ (default: <base>/comparison_plots; e.g. A/science/neb).",
+    )
+
+    parser.add_argument(
         "--dpi",
         type=int,
         default=200,
@@ -497,7 +505,7 @@ def main(argv=None):
 
     base = args.base if args.base is not None else RESULTS_DIR / "neb" / args.material
 
-    output_dir = base / "comparison_plots"
+    output_dir = args.output_dir if args.output_dir is not None else base / "comparison_plots"
 
     profiles_dir = output_dir / "individual_profiles"
 

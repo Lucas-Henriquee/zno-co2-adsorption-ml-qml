@@ -132,12 +132,15 @@ echo "[check] Python packages, versions, and APIs used by the code"
 py - "${PROFILE}" <<'PY'
 import importlib
 import inspect
+import os
 import platform
+import site
 import sys
 
 profile = sys.argv[1]
 problems = []
 warnings = []
+checked = {}  # module name -> module, for the user-site check at the end
 
 
 def version_tuple(text):
@@ -155,6 +158,7 @@ def load(name, needed_for):
         problems.append(f"{name}: cannot be imported ({exc}); needed for {needed_for}")
         print(f"  {name}: MISSING")
         return None
+    checked[name] = module
     print(f"  {name}: {getattr(module, '__version__', 'available')}")
     return module
 
@@ -165,8 +169,31 @@ def optional(name, needed_for):
     except Exception:
         print(f"  {name}: not installed (needed only for {needed_for})")
         return None
+    checked[name] = module
     print(f"  {name}: {getattr(module, '__version__', 'available')}")
     return module
+
+
+def user_site_warnings():
+    """Checked modules imported from the user site-packages instead of the environment."""
+    try:
+        user_site = site.getusersitepackages()
+    except Exception:
+        return
+    if not user_site:
+        return
+    user_site = os.path.realpath(user_site)
+    for name, module in checked.items():
+        location = getattr(module, "__file__", None)
+        if not location:
+            continue
+        location = os.path.realpath(location)
+        if location == user_site or location.startswith(user_site + os.sep):
+            warnings.append(
+                f"{name} is imported from the user site-packages ({location}), not from the "
+                f"environment prefix {sys.prefix}; rerun with PYTHONNOUSERSITE=1 to check the "
+                f"environment without the user packages"
+            )
 
 
 def probe(description, check):
@@ -233,12 +260,12 @@ if profile == "simulation":
         probe("HarmonicThermo(ignore_imag_modes=), IdealGasThermo (CO2RR)", thermo_api)
     for name in ("nbconvert", "nbclient", "ipykernel"):
         optional(name, "notebooks/run_zno_notebook.sh")
-    for name in ("pytest", "sklearn"):
-        optional(name, "the test suite")
+    optional("pytest", "the test suite")
+    optional("sklearn", "the test suite and the classical models; package: scikit-learn")
 
 elif profile == "analysis":
-    for name in ("sklearn", "pytest"):
-        optional(name, "the test suite and the classical models")
+    optional("sklearn", "the test suite and the classical models; package: scikit-learn")
+    optional("pytest", "the test suite")
 
 elif profile == "modeling":
     load("sklearn", "SVM baselines and grouped evaluation (package: scikit-learn)")
@@ -263,6 +290,7 @@ elif profile == "modeling":
         optional(name, "headless notebook execution")
     optional("pytest", "the test suite")
 
+user_site_warnings()
 for message in warnings:
     print(f"[warn] {message}")
 if problems:

@@ -1,7 +1,7 @@
 """Environment files cover what the code imports, and parse.
 
 Every third-party module imported by scripts/ (except scripts/legacy), tests/ and the
-notebooks must be provided by at least one environment YAML; the pip requirements
+notebooks (except the optional PyMOL renderer) must be provided by at least one environment YAML; the pip requirements
 must cover the GPAW-free subset; every shell script must pass ``bash -n``.
 """
 import ast
@@ -33,6 +33,9 @@ TRANSITIVE = {
 }
 # Needs GPAW, which pip cannot provide with MPI: only the simulation environment.
 GPAW_ONLY = {"gpaw"}
+# Optional, not in any environment: export_pymol renders fig01 with PyMOL
+# (pymol-open-source) when importable, else with its ASE/matplotlib fallback.
+OPTIONAL = {"pymol", "pymol2"}
 FIRST_PARTY = {"scripts", "tests"}
 STDLIB = set(sys.stdlib_module_names) | {"__future__"}
 NAME_PATTERN = re.compile(r"^\s*([A-Za-z0-9][A-Za-z0-9._-]*)")
@@ -49,7 +52,7 @@ def imports_in_source(source: str) -> set[str]:
             found.update(alias.name.split(".")[0] for alias in node.names)
         elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
             found.add(node.module.split(".")[0])
-    return {name for name in found if name not in STDLIB and name not in FIRST_PARTY}
+    return {name for name in found if name not in STDLIB and name not in FIRST_PARTY and name not in OPTIONAL}
 
 
 def python_files(*directories: str) -> list[Path]:

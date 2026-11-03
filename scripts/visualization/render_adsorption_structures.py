@@ -2,6 +2,13 @@
 
 Only the exposed slab layer and CO2 are drawn. Saved DFT coordinates and
 reported descriptors are checked but never modified.
+
+Inputs of one simulation run (RUN = results/simulations/<id>):
+  --input-dir RUN/dft/ZnO      (<site>/ZnO_<site>_optimized.xyz)
+  --summary   RUN/dft_summary.csv
+and the shared starting geometry (not copied into a run):
+  --site-metadata data/geometries/ZnO/metadata.json, --initial-slab data/geometries/ZnO/clean_slab.traj
+Every input must exist; a missing one is an error (no fallback).
 """
 
 from __future__ import annotations
@@ -39,8 +46,10 @@ class SiteData:
     site_atoms: tuple[int, ...]
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=__doc__)
+def parse_args(argv=None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     parser.add_argument("--input-dir", type=Path, default=DFT_RESULTS_DIR / "ZnO")
     parser.add_argument("--summary", type=Path, default=RESULTS_DIR / "dft_summary.csv")
     parser.add_argument(
@@ -59,7 +68,22 @@ def parse_args() -> argparse.Namespace:
         "--allow-geometry-warnings", action="store_true",
         help="Create a diagnostic draft despite warnings; never labels it publication-ready.",
     )
-    return parser.parse_args()
+    return parser.parse_args(argv)
+
+
+def check_inputs(args) -> None:
+    """Fail with one message listing every missing input file."""
+    required = [
+        ("--summary", args.summary),
+        ("--site-metadata", args.site_metadata),
+        ("--initial-slab", args.initial_slab),
+    ]
+    required += [
+        ("--input-dir", args.input_dir / site / f"ZnO_{site}_optimized.xyz") for site in SITES
+    ]
+    missing = [f"{option}: {path}" for option, path in required if not Path(path).is_file()]
+    if missing:
+        raise SystemExit("Missing input file(s):\n  " + "\n  ".join(missing))
 
 
 def geometry_metrics(atoms) -> dict[str, float]:
@@ -375,8 +399,9 @@ def save_combined(data_by_site: dict[str, SiteData], args, suffix: str) -> None:
     plt.close(fig)
 
 
-def main() -> None:
-    args = parse_args()
+def main(argv=None) -> None:
+    args = parse_args(argv)
+    check_inputs(args)
     summary = load_summary(args.summary)
     with args.site_metadata.open(encoding="utf-8") as handle:
         metadata = json.load(handle)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import hashlib
 import json
 import os
@@ -21,34 +22,117 @@ from scripts.workflows.active_environment import active_environment
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG = PROJECT_ROOT / "configs" / "analysis" / "zno_current.yaml"
-METHOD_ORDER = ("screening", "co2_reduction", "science_figures", "model_analysis")
+METHOD_ORDER = (
+    "screening",
+    "co2rr_corrections",
+    "co2_reduction",
+    "science_figures",
+    "neb",
+    "md_trajectory",
+    "structures",
+    "paper_figures",
+    "paper_tables",
+    "model_analysis",
+)
 DEPENDENCIES = {
     "screening": (),
-    "co2_reduction": (),
+    "co2rr_corrections": (),
+    "co2_reduction": ("co2rr_corrections",),
     "science_figures": ("co2_reduction",),
+    "neb": (),
+    "md_trajectory": (),
+    "structures": (),
+    "paper_figures": ("co2rr_corrections", "neb", "md_trajectory"),
+    "paper_tables": ("co2rr_corrections", "neb", "md_trajectory"),
     "model_analysis": (),
 }
 ALIASES = {
-    "science": ["screening", "co2_reduction", "science_figures"],
+    "science": ["screening", "co2rr_corrections", "co2_reduction", "science_figures"],
+    "paper": [
+        "co2rr_corrections",
+        "co2_reduction",
+        "science_figures",
+        "neb",
+        "md_trajectory",
+        "structures",
+        "paper_figures",
+        "paper_tables",
+    ],
     "models": ["model_analysis"],
     "model-analysis": ["model_analysis"],
 }
 OUTPUT_SUBDIRECTORIES = {
     "screening": Path("science/screening"),
+    "co2rr_corrections": Path("science/co2rr"),
     "co2_reduction": Path("science/co2_reduction"),
     "science_figures": Path("science/figures"),
+    "neb": Path("science/neb"),
+    "md_trajectory": Path("science/md"),
+    "structures": Path("science/structures"),
+    "paper_figures": Path("paper"),
+    "paper_tables": Path("paper"),
     "model_analysis": Path("models"),
 }
+PAPER_DIRECTORY = Path("paper")
+PAPER_METHODS = ("paper_figures", "paper_tables")
+REGISTRY_NAME = "figure_registry.csv"
+REGISTRY_FIELDS = ("item", "file", "producer_module", "inputs", "sha256", "note")
+SKIPPED_NOTE = "not written: skipped by the producer (see logs/{method}.log)"
+PAPER_FIGURE_NAMES = {
+    "fig03": "fig03_dft_descriptors",
+    "fig04": "fig04_tddft_spectra",
+    "fig05": "fig05_co2rr_pathway",
+    "fig06": "fig06_md_distance",
+    "fig07": "fig07_neb_profiles",
+}
+DIAGNOSTIC_NOTE = "diagnostic draft: geometry warnings (allow_geometry_warnings), not publication-ready"
+CO2RR_VARIANTS = ("a", "b", "c")
+STRUCTURE_SITES = ("top_metal", "top_oxygen", "bridge")
+CORRECTED_SUMMARY = "co2rr_corrected_summary.csv"
+MD_SUMMARY = "md_trajectory_analysis_summary.csv"
+# Paper items: producer module and the analysis method whose run inputs they use.
+PAPER_ITEMS = {
+    "fig01_adsorption_structures": ("scripts.visualization.export_pymol", "structures"),
+    "fig03_dft_descriptors": ("scripts.visualization.paper_figures", "paper_figures"),
+    "fig04_tddft_spectra": ("scripts.visualization.paper_figures", "paper_figures"),
+    "fig05_co2rr_pathway": ("scripts.visualization.paper_figures", "paper_figures"),
+    "fig06_md_distance": ("scripts.visualization.paper_figures", "paper_figures"),
+    "fig07_neb_profiles": ("scripts.visualization.paper_figures", "paper_figures"),
+    "table02_site_summary": ("scripts.analysis.paper_tables", "paper_tables"),
+}
+# Folders of the science methods copied into A/paper: (method, source folder below the
+# method directory, paper folder, file that must be present). fig03-fig07 are drawn by
+# paper_figures itself; fig01 is rendered by export_pymol (PyMOL when importable, else the
+# ASE/matplotlib fallback) and its combined PNG is copied to A/paper/ as well.
+PYMOL_SUBDIRECTORY = "pymol"
+FIG01_PYMOL_DIRECTORY = "fig01_pymol"
+FIG01_PML = "fig01_adsorption_structures.pml"
+FIG01_PNG = "fig01_adsorption_structures.png"
+FIG01_RENDER_INFO = "render_info.json"
+FIG01_NOTE = f"made in PyMOL from {FIG01_PYMOL_DIRECTORY}/{FIG01_PML}"
+FIG01_RENDER_NOTES = {
+    "pymol": f"rendered by export_pymol with PyMOL (headless, the commands of {FIG01_PYMOL_DIRECTORY}/{FIG01_PML})",
+    "ase": (f"rendered by export_pymol with the ASE/matplotlib fallback (PyMOL not importable; same atoms "
+            f"and view as {FIG01_PYMOL_DIRECTORY}/{FIG01_PML})"),
+}
+STRUCTURE_RENDERERS = ("auto", "pymol", "ase", "none")
+PAPER_COPIES = (
+    ("structures", PYMOL_SUBDIRECTORY, FIG01_PYMOL_DIRECTORY, FIG01_PML),
+)
+PREVIEW_DIAGNOSTIC = "zno_adsorption_sites_combined_diagnostic.png"
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Run isolated scientific, model, table, and figure analyses."
     )
     parser.add_argument(
         "methods",
         nargs="*",
-        help="screening, co2_reduction, science_figures, model_analysis, science, models, or all.",
+        help=(
+            f"{', '.join(METHOD_ORDER)}; aliases: {', '.join(ALIASES)}; or all. "
+            "Dependencies are added automatically."
+        ),
     )
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--scientific-results", type=Path)
@@ -60,7 +144,7 @@ def parse_args() -> argparse.Namespace:
         help="Validate inputs and print commands without creating files.",
     )
     parser.add_argument("--list-methods", action="store_true")
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
 def fail(message: str) -> None:
@@ -72,6 +156,14 @@ def resolve_project_path(path: Path) -> Path:
     if not expanded.is_absolute():
         expanded = PROJECT_ROOT / expanded
     return expanded.resolve()
+
+
+def display_path(path: Path) -> str:
+    """Path relative to the project root when below it, else absolute."""
+    try:
+        return str(Path(path).resolve().relative_to(PROJECT_ROOT))
+    except ValueError:
+        return str(path)
 
 
 def load_config(path: Path) -> dict[str, Any]:
@@ -101,6 +193,39 @@ def method_config(config: dict[str, Any], method: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         fail(f"Configuration field 'methods.{method}' must be a mapping.")
     return value
+
+
+def material_name(config: dict[str, Any]) -> str:
+    value = str(require_mapping(config, "input").get("material", "ZnO"))
+    if not re.fullmatch(r"[A-Za-z0-9]+", value):
+        fail(f"Configuration field 'input.material' is not a material name: {value}")
+    return value
+
+
+def co2rr_variant(config: dict[str, Any]) -> str:
+    value = str(method_config(config, "co2rr_corrections").get("variant", "c"))
+    if value not in CO2RR_VARIANTS:
+        fail(f"methods.co2rr_corrections.variant must be one of {', '.join(CO2RR_VARIANTS)}: {value}")
+    return value
+
+
+def positive_int(settings: dict[str, Any], key: str, default: int, method: str) -> int:
+    value = settings.get(key, default)
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        fail(f"methods.{method}.{key} must be a positive integer: {value!r}")
+    return value
+
+
+def positive_float(settings: dict[str, Any], key: str, default: float, method: str) -> float:
+    value = settings.get(key, default)
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+        fail(f"methods.{method}.{key} must be a positive number: {value!r}")
+    return float(value)
+
+
+def format_number(value: float) -> str:
+    """Two decimals when exact (0.1 -> '0.10'), else the shortest repr."""
+    return f"{value:.2f}" if round(value, 2) == value else repr(value)
 
 
 def normalize_methods(raw: list[str]) -> list[str]:
@@ -169,6 +294,29 @@ def runtime_versions() -> dict[str, str]:
     return versions
 
 
+def git_state() -> dict[str, Any]:
+    """Commit and dirty flag of the checkout; None values outside a Git checkout."""
+    try:
+        commit = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=PROJECT_ROOT,
+            capture_output=True, text=True, check=True, timeout=30,
+        ).stdout.strip()
+        status = subprocess.run(
+            ["git", "status", "--porcelain"], cwd=PROJECT_ROOT,
+            capture_output=True, text=True, check=True, timeout=60,
+        ).stdout
+    except (OSError, subprocess.SubprocessError) as exc:
+        return {"commit": None, "dirty": None, "error": f"{type(exc).__name__}: {exc}"}
+    return {"commit": commit or None, "dirty": bool(status.strip())}
+
+
+def simulation_run_manifest(scientific_results: Path) -> dict[str, Any]:
+    path = scientific_results / "run_manifest.json"
+    if not path.is_file():
+        return {"path": str(path), "sha256": None, "present": False}
+    return {"path": str(path), "sha256": file_sha256(path), "present": True}
+
+
 def discover_benchmark_summary(model_run: Path) -> Path:
     matches = sorted(model_run.rglob("benchmark_summary.csv"))
     if not matches:
@@ -178,27 +326,132 @@ def discover_benchmark_summary(model_run: Path) -> Path:
     return matches[0]
 
 
+def require_matches(root: Path, pattern: str, description: str) -> list[Path]:
+    matches = sorted(path for path in root.glob(pattern) if path.is_file())
+    if not matches:
+        fail(f"No {description} found: {root / pattern}")
+    return matches
+
+
+def desorption_threshold(config: dict[str, Any]) -> str:
+    """methods.md_trajectory.desorption_threshold_ang; passed to the MD analysis and paper_figures."""
+    settings = method_config(config, "md_trajectory")
+    return format_number(positive_float(settings, "desorption_threshold_ang", 4.5, "md_trajectory"))
+
+
+def paper_figure_selection(config: dict[str, Any]) -> list[str]:
+    figures = method_config(config, "paper_figures").get("figures")
+    if not figures:
+        return list(PAPER_FIGURE_NAMES)
+    if not isinstance(figures, list) or not all(str(f) in PAPER_FIGURE_NAMES for f in figures):
+        fail(f"methods.paper_figures.figures must be null or a subset of {list(PAPER_FIGURE_NAMES)}: {figures!r}")
+    return [str(f) for f in figures]
+
+
+def md_seed(config: dict[str, Any]) -> str:
+    """methods.paper_figures.md_seed: the MD seed drawn in fig06 (default 1234)."""
+    value = method_config(config, "paper_figures").get("md_seed", 1234)
+    if isinstance(value, bool) or not re.fullmatch(r"[0-9]+", str(value)):
+        fail(f"methods.paper_figures.md_seed must be a non-negative integer: {value!r}")
+    return str(value)
+
+
+def expected_paper_files(config: dict[str, Any], resolved: list[str]) -> dict[str, str]:
+    """Files paper_figures / paper_tables should write -> producing method."""
+    expected: dict[str, str] = {}
+    if "paper_figures" in resolved:
+        for figure in paper_figure_selection(config):
+            stem = PAPER_FIGURE_NAMES[figure]
+            for suffix in (".png", ".pdf", "_data.csv"):
+                expected[stem + suffix] = "paper_figures"
+    if "paper_tables" in resolved:
+        for ext in ("csv", "md", "tex"):
+            expected[f"table02_site_summary.{ext}"] = "paper_tables"
+    return expected
+
+
+def structure_renderer(config: dict[str, Any]) -> str:
+    value = str(method_config(config, "structures").get("render", "auto"))
+    if value not in STRUCTURE_RENDERERS:
+        fail(f"methods.structures.render must be one of {', '.join(STRUCTURE_RENDERERS)}: {value}")
+    return value
+
+
+def allow_geometry_warnings(config: dict[str, Any]) -> bool:
+    return bool(method_config(config, "structures").get("allow_geometry_warnings", False))
+
+
+def structure_geometry_dir(config: dict[str, Any], scientific_results: Path) -> Path:
+    """Starting geometry of the structures figure: configured, else the run's, else data/."""
+    material = material_name(config)
+    configured = method_config(config, "structures").get("geometry_dir")
+    if configured:
+        return resolve_project_path(Path(str(configured))) / material
+    run_geometry = scientific_results / "data" / "geometries" / material
+    if (run_geometry / "metadata.json").is_file() and (run_geometry / "clean_slab.traj").is_file():
+        return run_geometry
+    return PROJECT_ROOT / "data" / "geometries" / material
+
+
 def collect_inputs(
     method: str,
     config: dict[str, Any],
     scientific_results: Path,
     model_run: Path,
 ) -> list[Path]:
+    """Input files of one method below the simulation or model run.
+
+    Required inputs must exist (else an error); optional ones are recorded when present.
+    Files written by earlier methods of the same analysis run are not inputs.
+    """
     paths: list[Path] = []
-    if method in {"screening", "co2_reduction"}:
-        paths.extend(
-            [scientific_results / "dft_summary.csv", scientific_results / "tddft_summary.csv"]
-        )
+    optional: list[Path] = []
+    run = scientific_results
+    material = material_name(config) if method != "model_analysis" else ""
+    if method in {"screening", "co2_reduction", "paper_figures", "paper_tables"}:
+        paths.extend([run / "dft_summary.csv", run / "tddft_summary.csv"])
     if method == "co2_reduction":
-        pathway = scientific_results / "co2rr_pathway_summary.csv"
+        pathway = run / "co2rr_pathway_summary.csv"
         if bool(method_config(config, method).get("require_pathway_results", False)):
             paths.append(pathway)
         elif pathway.is_file():
             paths.append(pathway)
+    if method == "co2rr_corrections":
+        paths.append(run / "co2rr_pathway_summary.csv")
+        if (run / "pathways").is_dir():
+            paths.extend(require_matches(run / "pathways", "**/energy.json", "CO2RR energy.json files"))
+        else:
+            fail(f"CO2RR pathway directory does not exist: {run / 'pathways'}")
+        optional.append(run / "config.yaml")
     if method == "science_figures":
-        transitions = sorted(scientific_results.glob("tddft/*/*/transitions.csv"))
+        transitions = sorted(run.glob("tddft/*/*/transitions.csv"))
         if not transitions:
-            fail(f"No TDDFT transition files found below: {scientific_results / 'tddft'}")
+            fail(f"No TDDFT transition files found below: {run / 'tddft'}")
+        paths.extend(transitions)
+    if method == "neb":
+        base = run / "neb" / material
+        paths.extend(require_matches(base, "*/neb_run_summary.json", "NEB summaries (neb_run_summary.json)"))
+        optional.extend(sorted(base.glob("*/neb_final_images.traj")))
+        optional.append(run / "config.yaml")
+    if method == "md_trajectory":
+        paths.extend(require_matches(run / "md" / material, "*/seed_*/md_*.traj", "MD trajectories"))
+        optional.append(run / "config.yaml")
+        optional.append(PROJECT_ROOT / "data" / "geometries" / material / "clean_slab.traj")
+    if method == "structures":
+        geometry = structure_geometry_dir(config, run)
+        paths.append(run / "dft_summary.csv")
+        paths.extend(
+            run / "dft" / material / site / f"{material}_{site}_optimized.xyz" for site in STRUCTURE_SITES
+        )
+        paths.extend([geometry / "metadata.json", geometry / "clean_slab.traj"])
+    if method == "co2_reduction":
+        # Relaxed gas-phase CO2 of the run: baseline of the C-O stretch.
+        optional.extend(sorted(run.glob("dft/_reference/*/co2_ref.*_optimized.cif")))
+        optional.extend(sorted(run.glob("pathways/_references/*/co2/co2_optimized.xyz")))
+    if method == "paper_figures":
+        transitions = sorted(run.glob(f"tddft/{material}/*/transitions.csv"))
+        if not transitions:
+            fail(f"No TDDFT transition files found below: {run / 'tddft' / material}")
         paths.extend(transitions)
     if method == "model_analysis":
         paths.append(discover_benchmark_summary(model_run))
@@ -209,7 +462,8 @@ def collect_inputs(
 
     missing = [path for path in paths if not path.is_file()]
     if missing:
-        fail("Missing analysis inputs: " + ", ".join(str(path) for path in missing))
+        fail(f"Missing inputs of '{method}': " + ", ".join(str(path) for path in missing))
+    paths.extend(path for path in optional if path.is_file())
     return list(dict.fromkeys(paths))
 
 
@@ -222,6 +476,7 @@ def build_commands(
 ) -> list[list[str]]:
     python = sys.executable
     output = run_dir / OUTPUT_SUBDIRECTORIES[method]
+    settings = {} if method == "screening" else method_config(config, method)
     if method == "screening":
         return [[
             python,
@@ -232,6 +487,22 @@ def build_commands(
             "--output-dir",
             str(output),
         ]]
+    if method == "co2rr_corrections":
+        return [
+            [
+                python, "-m", "scripts.analysis.co2rr_corrections",
+                "--results-dir", str(scientific_results),
+                "--output-dir", str(output),
+            ],
+            [
+                python, "-m", "scripts.visualization.plot_co2rr_pathway",
+                "--summary", str(scientific_results / "co2rr_pathway_summary.csv"),
+                "--corrected", str(output / CORRECTED_SUMMARY),
+                "--variant", co2rr_variant(config),
+                "--material", material_name(config),
+                "--output-dir", str(output),
+            ],
+        ]
     if method == "co2_reduction":
         return [[
             python,
@@ -241,6 +512,10 @@ def build_commands(
             str(scientific_results),
             "--output-dir",
             str(output),
+            "--co2rr-variant",
+            co2rr_variant(config),
+            "--corrected-summary",
+            str(run_dir / OUTPUT_SUBDIRECTORIES["co2rr_corrections"] / CORRECTED_SUMMARY),
         ]]
     if method == "science_figures":
         return [[
@@ -254,7 +529,87 @@ def build_commands(
             "--output-dir",
             str(output),
             "--dpi",
-            str(int(method_config(config, method).get("dpi", 600))),
+            str(int(settings.get("dpi", 600))),
+        ]]
+    if method == "neb":
+        base = scientific_results / "neb" / material_name(config)
+        resolution = settings.get("barrier_resolution_ev")
+        if resolution is not None:
+            if isinstance(resolution, bool) or not isinstance(resolution, (int, float)) or resolution < 0:
+                fail(f"methods.neb.barrier_resolution_ev must be null or a non-negative number: {resolution!r}")
+            resolution_args = ["--barrier-resolution", str(float(resolution))]
+        else:
+            resolution_args = []  # the producers read methods.neb of the run's config.yaml
+        plot = [
+            python, "-m", "scripts.visualization.plot_neb",
+            "--base", str(base), "--output-dir", str(output), *resolution_args,
+        ]
+        if bool(settings.get("smooth_band", True)):
+            plot.append("--smooth-band")
+        if "dpi" in settings:
+            plot.extend(["--dpi", str(positive_int(settings, "dpi", 600, method))])
+        return [
+            [
+                python, "-m", "scripts.analysis.neb_energy_table",
+                "--base", str(base), "--output-dir", str(output), *resolution_args,
+            ],
+            plot,
+        ]
+    if method == "md_trajectory":
+        return [[
+            python, "-m", "scripts.analysis.md_trajectory_analysis",
+            "--results-dir", str(scientific_results),
+            "--material", material_name(config),
+            "--output-dir", str(output),
+            "--desorption-threshold", desorption_threshold(config),
+        ]]
+    if method == "structures":
+        material = material_name(config)
+        geometry = structure_geometry_dir(config, scientific_results)
+        return [[
+            # Fig. 1: relaxed structures (PDB/CIF), PyMOL script and the rendered panels.
+            python, "-m", "scripts.visualization.export_pymol",
+            "--input-dir", str(scientific_results / "dft" / material),
+            "--summary", str(scientific_results / "dft_summary.csv"),
+            "--material", material,
+            "--output-dir", str(output / PYMOL_SUBDIRECTORY),
+            "--render", structure_renderer(config),
+            "--dpi", str(positive_int(settings, "dpi", 600, method)),
+        ], [
+            # Matplotlib preview of the same structures (not copied into A/paper).
+            python, "-m", "scripts.visualization.render_adsorption_structures",
+            "--input-dir", str(scientific_results / "dft" / material),
+            "--summary", str(scientific_results / "dft_summary.csv"),
+            "--site-metadata", str(geometry / "metadata.json"),
+            "--initial-slab", str(geometry / "clean_slab.traj"),
+            "--output-dir", str(output),
+            "--dpi", str(positive_int(settings, "dpi", 600, method)),
+            *(["--allow-geometry-warnings"] if allow_geometry_warnings(config) else []),
+        ]]
+    if method == "paper_figures":
+        command = [
+            python, "-m", "scripts.visualization.paper_figures",
+            "--results-dir", str(scientific_results),
+            "--analysis-dir", str(run_dir),
+            "--output-dir", str(output),
+            "--material", material_name(config),
+            "--dpi", str(positive_int(settings, "dpi", 600, method)),
+            "--tddft-sigma-ev", format_number(positive_float(settings, "tddft_sigma_ev", 0.10, method)),
+            "--desorption-threshold", desorption_threshold(config),
+            "--md-seed", md_seed(config),
+            "--co2rr-variant", co2rr_variant(config),
+        ]
+        if settings.get("figures"):
+            command.extend(["--figures", *paper_figure_selection(config)])
+        return [command]
+    if method == "paper_tables":
+        return [[
+            python, "-m", "scripts.analysis.paper_tables",
+            "--results-dir", str(scientific_results),
+            "--analysis-dir", str(run_dir),
+            "--output-dir", str(output),
+            "--material", material_name(config),
+            "--co2rr-variant", co2rr_variant(config),
         ]]
     benchmark_summary = discover_benchmark_summary(model_run)
     model_tables = output / "tables"
@@ -280,7 +635,7 @@ def build_commands(
             "--output-dir",
             str(model_figures),
             "--dpi",
-            str(int(method_config(config, method).get("dpi", 300))),
+            str(int(settings.get("dpi", 300))),
         ],
     ]
 
@@ -290,6 +645,21 @@ def inventory(paths: list[Path]) -> list[dict[str, Any]]:
         {"path": str(path), "bytes": path.stat().st_size, "sha256": file_sha256(path)}
         for path in sorted(paths)
     ]
+
+
+def snapshot(directory: Path) -> dict[Path, tuple[int, int]]:
+    if not directory.is_dir():
+        return {}
+    return {
+        path: (path.stat().st_mtime_ns, path.stat().st_size)
+        for path in directory.rglob("*") if path.is_file()
+    }
+
+
+def new_or_changed(directory: Path, before: dict[Path, tuple[int, int]]) -> list[Path]:
+    """Files written below a (possibly shared) method directory since `before`."""
+    after = snapshot(directory)
+    return sorted(path for path, state in after.items() if before.get(path) != state)
 
 
 def write_manifest(path: Path, manifest: dict[str, Any]) -> None:
@@ -334,8 +704,202 @@ def run_command(command: list[str], log_path: Path) -> None:
         raise subprocess.CalledProcessError(return_code, command)
 
 
-def main() -> None:
-    args = parse_args()
+# ------------------------------------------------------------------ paper collection
+
+
+def paper_collection_enabled(resolved: list[str]) -> bool:
+    return any(method in resolved for method in PAPER_METHODS)
+
+
+def paper_copy_plan(resolved: list[str], run_dir: Path) -> list[tuple[str, Path, str, str]]:
+    """(method, source folder, paper folder, required file) of the copies made after all methods."""
+    if not paper_collection_enabled(resolved):
+        return []
+    return [
+        (method, run_dir / OUTPUT_SUBDIRECTORIES[method] / source, target, required)
+        for method, source, target, required in PAPER_COPIES
+        if method in resolved
+    ]
+
+
+def copy_paper_outputs(
+    resolved: list[str], run_dir: Path, allow_diagnostic: bool = False
+) -> list[dict[str, str]]:
+    """Copy the fig01 folder (structures, .pml, PNGs) into A/paper/fig01_pymol/.
+
+    When export_pymol rendered the figure (render_info.json), the combined PNG is also
+    copied to A/paper/fig01_adsorption_structures.png.
+
+    A structures preview rendered with geometry warnings (``*_diagnostic.png``) is a
+    failure unless allow_diagnostic (the registry then flags fig01 as a diagnostic draft).
+    """
+    paper_dir = run_dir / PAPER_DIRECTORY
+    paper_dir.mkdir(parents=True, exist_ok=True)
+    copied: list[dict[str, str]] = []
+    for method, source_dir, target_dir, required in paper_copy_plan(resolved, run_dir):
+        if method == "structures":
+            diagnostic = run_dir / OUTPUT_SUBDIRECTORIES[method] / PREVIEW_DIAGNOSTIC
+            if diagnostic.is_file() and not allow_diagnostic:
+                raise RuntimeError(
+                    f"Paper collection: structures preview has geometry warnings ({diagnostic}); "
+                    "set methods.structures.allow_geometry_warnings for a diagnostic draft"
+                )
+        if not (source_dir / required).is_file():
+            raise RuntimeError(f"Paper collection: '{method}' wrote no {source_dir / required}")
+        (paper_dir / target_dir).mkdir(parents=True, exist_ok=True)
+        for source in sorted(path for path in source_dir.iterdir() if path.is_file()):
+            target = f"{target_dir}/{source.name}"
+            shutil.copy2(source, paper_dir / target)
+            copied.append({"method": method, "source": str(source), "file": target})
+        if method == "structures":
+            combined = fig01_render_info(source_dir).get("combined")
+            if combined:
+                source = source_dir / str(combined)
+                if not source.is_file():
+                    raise RuntimeError(f"Paper collection: render_info.json names a missing {source}")
+                shutil.copy2(source, paper_dir / FIG01_PNG)
+                copied.append({"method": method, "source": str(source), "file": FIG01_PNG})
+    return copied
+
+
+def fig01_render_info(directory: Path) -> dict[str, Any]:
+    """render_info.json of export_pymol ({} when absent or unreadable)."""
+    path = directory / FIG01_RENDER_INFO
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def structures_preview_is_diagnostic(run_dir: Path) -> bool:
+    return (run_dir / OUTPUT_SUBDIRECTORIES["structures"] / PREVIEW_DIAGNOSTIC).is_file()
+
+
+def paper_item(name: str) -> str:
+    if name.startswith(FIG01_PYMOL_DIRECTORY + "/"):
+        return "fig01_adsorption_structures"
+    for item in PAPER_ITEMS:
+        if name == item or name.startswith(item + "_") or name.startswith(item + "."):
+            return item
+    return Path(name).stem
+
+
+def paper_item_inputs(
+    item: str,
+    run_dir: Path,
+    scientific_results: Path,
+    material: str,
+    inputs_by_method: dict[str, list[Path]],
+) -> list[Path]:
+    """Files an item was drawn from: run inputs and intermediate analysis tables."""
+    run = scientific_results
+    science = {method: run_dir / OUTPUT_SUBDIRECTORIES[method] for method in OUTPUT_SUBDIRECTORIES}
+    if item == "fig01_adsorption_structures":
+        paths = [run / "dft_summary.csv", *sorted(run.glob(f"dft/{material}/*/{material}_*_optimized.xyz"))]
+    elif item == "fig03_dft_descriptors":
+        paths = [run / "dft_summary.csv"]
+    elif item == "fig04_tddft_spectra":
+        paths = [run / "tddft_summary.csv", *sorted(run.glob(f"tddft/{material}/*/transitions.csv"))]
+    elif item == "fig05_co2rr_pathway":
+        paths = [science["co2rr_corrections"] / CORRECTED_SUMMARY]
+    elif item == "fig06_md_distance":
+        paths = [
+            science["md_trajectory"] / MD_SUMMARY,
+            *sorted(run.glob(f"md/{material}/*/md_frame_analysis.csv")),
+        ]
+    elif item == "fig07_neb_profiles":
+        paths = [science["neb"] / "neb_image_energies.csv", science["neb"] / "neb_barriers.csv"]
+    elif item == "table02_site_summary":
+        paths = [
+            run / "dft_summary.csv",
+            science["co2rr_corrections"] / CORRECTED_SUMMARY,
+            science["neb"] / "neb_barriers.csv",
+            science["md_trajectory"] / MD_SUMMARY,
+            run / "tddft_summary.csv",
+        ]
+    elif item in PAPER_ITEMS:
+        paths = list(inputs_by_method.get(PAPER_ITEMS[item][1], []))
+    else:
+        paths = []
+    return [path for path in dict.fromkeys(paths) if path.is_file()]
+
+
+def write_figure_registry(
+    run_dir: Path,
+    scientific_results: Path,
+    material: str,
+    inputs_by_method: dict[str, list[Path]],
+    copied: list[dict[str, str]],
+    expected: dict[str, str] | None = None,
+) -> Path:
+    """A/paper/figure_registry.csv: one row per file in A/paper.
+
+    Expected files of paper_figures / paper_tables that are missing (a figure the
+    producer skipped) get a row with an empty sha256 and a note. The rendered
+    fig01_adsorption_structures.png is noted with the renderer (render_info.json); when
+    export_pymol rendered nothing (render: none), it gets a row with an empty sha256
+    noting that it is made in PyMOL from the copied script.
+    """
+    paper_dir = run_dir / PAPER_DIRECTORY
+    sources = {entry["file"]: Path(entry["source"]) for entry in copied}
+    registry = paper_dir / REGISTRY_NAME
+    rows = []
+    for path in sorted(p for p in paper_dir.rglob("*") if p.is_file() and p != registry):
+        name = str(path.relative_to(paper_dir))
+        item = paper_item(name)
+        producer = PAPER_ITEMS.get(item, ("unknown", ""))[0]
+        inputs = paper_item_inputs(item, run_dir, scientific_results, material, inputs_by_method)
+        if name in sources:
+            inputs = [sources[name], *inputs]
+        rows.append({
+            "item": item,
+            "file": name,
+            "producer_module": producer,
+            "inputs": ";".join(display_path(p) for p in inputs),
+            "sha256": file_sha256(path),
+            "note": DIAGNOSTIC_NOTE if "_diagnostic" in name else "",
+        })
+        if name == FIG01_PNG:
+            renderer = str(fig01_render_info(paper_dir / FIG01_PYMOL_DIRECTORY).get("renderer", ""))
+            note = FIG01_RENDER_NOTES.get(renderer, f"rendered by export_pymol (renderer: {renderer or 'unknown'})")
+            if structures_preview_is_diagnostic(run_dir):
+                note += "; " + DIAGNOSTIC_NOTE
+            rows[-1]["note"] = note
+    pml = paper_dir / FIG01_PYMOL_DIRECTORY / FIG01_PML
+    if pml.is_file() and not (paper_dir / FIG01_PNG).is_file():
+        note = FIG01_NOTE
+        if structures_preview_is_diagnostic(run_dir):
+            note += "; " + DIAGNOSTIC_NOTE
+        rows.append({
+            "item": "fig01_adsorption_structures",
+            "file": FIG01_PNG,
+            "producer_module": "PyMOL",
+            "inputs": display_path(pml),
+            "sha256": "",
+            "note": note,
+        })
+    present = {row["file"] for row in rows}
+    for name, method in sorted((expected or {}).items()):
+        if name not in present:
+            item = paper_item(name)
+            rows.append({
+                "item": item,
+                "file": name,
+                "producer_module": PAPER_ITEMS.get(item, ("unknown", ""))[0],
+                "inputs": "",
+                "sha256": "",
+                "note": SKIPPED_NOTE.format(method=method),
+            })
+    with registry.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=REGISTRY_FIELDS)
+        writer.writeheader()
+        writer.writerows(rows)
+    return registry
+
+
+def main(argv: list[str] | None = None) -> None:
+    args = parse_args(argv)
     if args.list_methods:
         print("\n".join([*METHOD_ORDER, *ALIASES, "all"]))
         return
@@ -371,6 +935,7 @@ def main() -> None:
         method: build_commands(method, config, scientific_results, model_run, run_dir)
         for method in resolved
     }
+    copy_plan = paper_copy_plan(resolved, run_dir)
 
     print(f"[plan] config: {config['_config_path']}")
     print(f"[plan] run ID: {run_id}")
@@ -384,6 +949,14 @@ def main() -> None:
         for command in commands_by_method[method]:
             print(f"[plan:{method}] {shlex.join(command)}")
         print(f"[plan:{method}] input files: {len(inputs_by_method[method])}")
+    if paper_collection_enabled(resolved):
+        for _method, source, target, _required in copy_plan:
+            print(f"[plan:paper] copy {source}/ -> {run_dir / PAPER_DIRECTORY / target}/")
+        for method, source, _target, _required in copy_plan:
+            if method == "structures" and structure_renderer(config) != "none":
+                print(f"[plan:paper] copy {source / FIG01_PNG} -> {run_dir / PAPER_DIRECTORY / FIG01_PNG} "
+                      f"(export_pymol --render {structure_renderer(config)})")
+        print(f"[plan:paper] registry: {run_dir / PAPER_DIRECTORY / REGISTRY_NAME}")
 
     if args.dry_run:
         print("[dry-run] Validation completed; no analysis files were created.")
@@ -398,6 +971,7 @@ def main() -> None:
     execution = require_mapping(config, "execution")
     environment_name = active_environment(str(execution.get("environment", "qml-zno-modeling")))
     manifest_path = run_dir / "run_manifest.json"
+    uses_simulation_run = any(method != "model_analysis" for method in resolved)
     manifest: dict[str, Any] = {
         "schema_version": 1,
         "run_id": run_id,
@@ -409,7 +983,11 @@ def main() -> None:
         "config_sha256": file_sha256(config_path),
         "environment": environment_name,
         "versions": runtime_versions(),
+        "git": git_state(),
         "scientific_results": str(scientific_results),
+        "simulation_run_manifest": (
+            simulation_run_manifest(scientific_results) if uses_simulation_run else None
+        ),
         "model_run": str(model_run),
         "selected_methods": selected,
         "resolved_methods": resolved,
@@ -428,14 +1006,21 @@ def main() -> None:
             }
             manifest["methods"][method] = record
             write_manifest(manifest_path, manifest)
+            method_root = run_dir / OUTPUT_SUBDIRECTORIES[method]
+            before = snapshot(method_root)
             try:
                 for command in commands_by_method[method]:
                     run_command(command, run_dir / "logs" / f"{method}.log")
-                method_root = run_dir / OUTPUT_SUBDIRECTORIES[method]
-                outputs = sorted(path for path in method_root.rglob("*") if path.is_file())
+                outputs = new_or_changed(method_root, before)
                 if not outputs:
                     raise RuntimeError(f"Method '{method}' produced no files.")
                 record["outputs"] = inventory(outputs)
+                if method == "md_trajectory":
+                    # Per-frame tables stay in the simulation run (the dataset builder reads them).
+                    frames = sorted(scientific_results.glob(
+                        f"md/{material_name(config)}/*/md_frame_analysis.csv"
+                    ))
+                    record["run_outputs"] = inventory(frames)
             except BaseException as exc:
                 record["status"] = "failed"
                 record["failed_at"] = utc_now()
@@ -445,6 +1030,38 @@ def main() -> None:
             record["status"] = "completed"
             record["completed_at"] = utc_now()
             write_manifest(manifest_path, manifest)
+
+        if paper_collection_enabled(resolved):
+            paper: dict[str, Any] = {"status": "running", "started_at": utc_now()}
+            manifest["paper"] = paper
+            write_manifest(manifest_path, manifest)
+            try:
+                copied = copy_paper_outputs(
+                    resolved, run_dir,
+                    "structures" in resolved and allow_geometry_warnings(config),
+                )
+                registry = write_figure_registry(
+                    run_dir, scientific_results, material_name(config), inputs_by_method, copied,
+                    expected_paper_files(config, resolved),
+                )
+            except BaseException as exc:
+                paper["status"] = "failed"
+                paper["error"] = f"{type(exc).__name__}: {exc}"
+                write_manifest(manifest_path, manifest)
+                raise
+            paper.update({
+                "status": "completed",
+                "completed_at": utc_now(),
+                "copied": copied,
+                "registry": {"path": str(registry), "sha256": file_sha256(registry)},
+                "files": inventory(sorted(p for p in registry.parent.rglob("*") if p.is_file())),
+                "missing": sorted(
+                    name for name in expected_paper_files(config, resolved)
+                    if not (registry.parent / name).is_file()
+                ),
+            })
+            write_manifest(manifest_path, manifest)
+            print(f"[paper] {registry}")
 
         manifest["status"] = "completed"
         write_manifest(manifest_path, manifest)

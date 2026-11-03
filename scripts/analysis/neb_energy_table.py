@@ -57,6 +57,13 @@ def parse_args(argv=None):
         help="Smallest forward barrier (eV) reported as resolved "
              "(default: methods.neb.barrier_resolution_ev of <results>/config.yaml, else 0.03).",
     )
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=None,
+        help="Directory for neb_image_energies.csv and neb_barriers.csv "
+             "(default: <base>/comparison_plots; e.g. A/science/neb of an analysis run).",
+    )
     return parser.parse_args(argv)
 
 
@@ -154,10 +161,11 @@ def main(argv=None):
         print(f"No NEB pair with valid image energies in {base}")
         return
 
-    out_csv = base / "comparison_plots" / "neb_image_energies.csv"
+    output_dir = args.output_dir if args.output_dir is not None else base / "comparison_plots"
+    out_csv = output_dir / "neb_image_energies.csv"
     write_rows(out_csv, rows)
     print(f"Complete table saved to: {out_csv}")
-    barrier_csv = base / "comparison_plots" / "neb_barriers.csv"
+    barrier_csv = output_dir / "neb_barriers.csv"
     write_rows(barrier_csv, barrier_rows)
     print(f"Recomputed barriers saved to: {barrier_csv}")
 

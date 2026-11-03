@@ -2,7 +2,8 @@
 
 Writes co2_reduction_table.csv, the figure tables and co2rr_pathway_template.csv.
 Sites are ranked only by the CHE limiting potential U_L of the CO2 -> CO pathway
-(co2rr_corrected_summary.csv variant c by default, else co2rr_pathway_summary.csv);
+(co2rr_corrected_summary.csv variant c by default, read from --corrected-summary or
+<results-dir>/co2rr_corrected_summary.csv, else co2rr_pathway_summary.csv);
 sites without a valid pathway (pathway_validity unbound or wrong_intermediate) are
 listed but not ranked. No composite score is computed.
 
@@ -39,7 +40,7 @@ EADS_POSITIVE_WARNING = "not bound at PBE level (E_ads > 0)"
 EADS_UNCERTAINTY_WARNING = f"|E_ads| below the ~{EADS_UNCERTAINTY_EV:.2f} eV numerical uncertainty"
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv=None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Build CO2-reduction analysis and figure-ready tables."
     )
@@ -58,13 +59,21 @@ def parse_args() -> argparse.Namespace:
         help=f"Use co2rr_pathway_summary.csv even if {CORRECTED_CSV} exists.",
     )
     parser.add_argument(
+        "--corrected-summary",
+        type=Path,
+        default=None,
+        help=f"Explicit {CORRECTED_CSV} (e.g. A/science/co2rr/{CORRECTED_CSV} of an analysis run). "
+             f"Default: <results-dir>/{CORRECTED_CSV} when it exists, else co2rr_pathway_summary.csv. "
+             "When given, the file must exist (no fallback to the uncorrected summary).",
+    )
+    parser.add_argument(
         "--co2-gas-bond-ang",
         type=float,
         default=None,
         help="Gas-phase CO2 C-O bond length (Ang) used as the baseline of the C-O stretch. "
              "Default: the relaxed CO2 reference of the same run (PBE), per DFT profile.",
     )
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
 def read_csv_rows(path: Path, required: bool = True) -> list[dict[str, str]]:
@@ -495,8 +504,8 @@ def write_manifest(path: Path) -> None:
     path.write_text("\n".join(lines), encoding="utf-8")
 
 
-def main() -> None:
-    args = parse_args()
+def main(argv=None) -> None:
+    args = parse_args(argv)
     results_dir = args.results_dir.expanduser().resolve()
     analysis_dir = args.output_dir.expanduser().resolve()
     analysis_dir.mkdir(parents=True, exist_ok=True)
@@ -506,11 +515,19 @@ def main() -> None:
 
     dft_rows = read_csv_rows(dft_path)
     tddft_rows = read_csv_rows(tddft_path)
+    if args.corrected_summary is not None and args.uncorrected:
+        raise SystemExit("--corrected-summary and --uncorrected are mutually exclusive.")
+    if args.corrected_summary is not None:
+        corrected_path = args.corrected_summary.expanduser().resolve()
+        if not corrected_path.is_file():
+            raise SystemExit(f"Missing corrected CO2RR summary (--corrected-summary): {corrected_path}")
+    else:
+        corrected_path = results_dir / CORRECTED_CSV
     corrected = None if args.uncorrected else load_corrected_pathway_rows(
-        results_dir / CORRECTED_CSV, args.co2rr_variant
+        corrected_path, args.co2rr_variant
     )
     if corrected is not None:
-        print(f"[co2-analysis] pathway values from {results_dir / CORRECTED_CSV} (variant {args.co2rr_variant})")
+        print(f"[co2-analysis] pathway values from {corrected_path} (variant {args.co2rr_variant})")
         pathway_rows = corrected
     else:
         pathway_rows = read_csv_rows(pathway_path, required=False)

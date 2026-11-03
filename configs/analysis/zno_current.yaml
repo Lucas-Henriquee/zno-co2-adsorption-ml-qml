@@ -13,6 +13,7 @@ input:
   # No valid model run exists yet (the ML phase reruns on the zno_ic_final datasets);
   # pass --model-run for the models stage.
   model_run: results/models/zno_md_grouped_local
+  material: ZnO
 
 output:
   root: results/analyses
@@ -25,11 +26,41 @@ methods:
   # TDDFT values are reported for information only (no photocatalysis score).
   screening: {}
 
+  # CHE free energies in variants a-c; co2_reduction and paper_tables use this variant.
+  co2rr_corrections:
+    variant: c
+
   co2_reduction:
     require_pathway_results: true
 
   science_figures:
     dpi: 600
+
+  neb:
+    # null: methods.neb.barrier_resolution_ev of the run's config.yaml.
+    barrier_resolution_ev: null
+    smooth_band: true
+
+  md_trajectory:
+    # Also passed to paper_figures (--desorption-threshold; not drawn).
+    desorption_threshold_ang: 4.5
+
+  structures:
+    # null: data/geometries/<material> of the run, else of the repository.
+    geometry_dir: null
+    # true: render despite geometry warnings; fig01 is then a *_diagnostic draft.
+    allow_geometry_warnings: false
+    # fig01 renderer of export_pymol: auto (PyMOL when importable, else ASE/matplotlib), pymol, ase, none.
+    render: auto
+    dpi: 600
+
+  paper_figures:
+    dpi: 600
+    tddft_sigma_ev: 0.10
+    md_seed: 1234
+    figures: null
+
+  paper_tables: {}
 
   model_analysis:
     dpi: 300

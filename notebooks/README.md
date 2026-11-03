@@ -8,7 +8,7 @@ settings come from `configs/simulations/zno_production.yaml` (copied into each r
 | Notebook | Runs | Configuration cell |
 | --- | --- | --- |
 | `zno-co2-lucas.ipynb` | Simulations through `scripts.workflows.run_simulations` (geometry, DFT, CO₂RR, TDDFT, MD, NEB) and a summary of the raw outputs; it runs exactly what `./run_simulations.sh` runs | `RUN_ID`, sites, `MPI_PROCESSES` (6), `RETRY_FAILED`, `RUN_*` flags |
-| `zno-co2-analysis.ipynb` | Analyses of a finished or running simulation run: status dashboard, CO₂RR corrections, pathway plot and CO₂ reduction tables, NEB tables and plots, MD trajectory analysis, publication figures | `RUN_ID`, `OUTPUT_ID`, CO₂RR variant (c), NEB resolution (default: the run's `config.yaml`), figure DPI, `RUN_*` flags |
+| `zno-co2-analysis.ipynb` | Analyses of a finished or running simulation run: status dashboard, CO₂RR corrections, pathway plot and CO₂ reduction tables, NEB tables and plots, MD trajectory analysis, publication figures, paper figures and tables (`run_analysis paper`) | `RUN_ID`, `OUTPUT_ID`, CO₂RR variant (c), NEB resolution (default: the run's `config.yaml`), figure DPI, `RUN_*` flags |
 
 - Every `RUN_*` flag is `False` in the saved notebooks: nothing runs until one is set.
 - Start them from `notebooks/` or the repository root.
@@ -22,6 +22,14 @@ settings come from `configs/simulations/zno_production.yaml` (copied into each r
   modules get no output directory and write into the simulation run: `co2rr_corrected_summary.csv`,
   `neb/<material>/comparison_plots/`, `md_trajectory_analysis_summary.csv`,
   `md_desorption_sensitivity.csv`, `md/<material>/...`.
+- Analysis notebook, `RUN_PAPER`: runs `python -m scripts.workflows.run_analysis paper
+  --config configs/analysis/zno_paper.yaml --scientific-results <run> --run-id
+  <OUTPUT_ID>_paper` into `results/analyses/<OUTPUT_ID>_paper/` (settings from the YAML,
+  not from the notebook) and lists `paper/` (`fig01_adsorption_structures.png` rendered by
+  `export_pymol`: PyMOL when `import pymol` works, else the ASE/matplotlib fallback;
+  `pymol-open-source` from conda-forge is optional and only changes the renderer; the
+  PDB/CIF and `fig01_adsorption_structures.pml` for PyMOL are in `paper/fig01_pymol/`) and
+  `figure_registry.csv`.
 
 ## Environment
 

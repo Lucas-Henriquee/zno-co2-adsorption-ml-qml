@@ -65,14 +65,17 @@ Per frame, with the minimum-image convention in the surface plane:
   production frame (positions unwrapped frame to frame). It is a single-trajectory
   quantity, not an ensemble average; NaN during equilibration.
 
-Outputs:
+Outputs (OUT = ``--output-dir``, default ``--results-dir``; e.g.
+results/analyses/<id>/science/md of an analysis run):
 
-* ``md/<material>/<site>/md_frame_analysis.csv``: one row per frame and seed.
-* ``md_trajectory_analysis_summary.csv`` (run level): one row per trajectory
+* ``<results-dir>/md/<material>/<site>/md_frame_analysis.csv``: one row per frame
+  and seed. Always written inside the simulation run, also with ``--output-dir``
+  (the ML dataset builder and the paper figures read it there).
+* ``OUT/md_trajectory_analysis_summary.csv`` (run level): one row per trajectory
   (configured sites/seeds without data included as ``missing`` / ``not_started``).
   ``fraction_production_other`` is the fraction of production frames whose
   ``site_assignment`` is ``other``.
-* ``md_desorption_sensitivity.csv`` (run level): for each trajectory and each
+* ``OUT/md_desorption_sensitivity.csv`` (run level): for each trajectory and each
   ``--desorption-thresholds`` value (default 4.0 4.5 5.0 A), the fraction of
   production frames with ``c_o_min_slab_distance_ang`` above the threshold
   (``fraction_desorbed``, single frame) and the persistent fraction
@@ -80,7 +83,7 @@ Outputs:
   first-principles justification (about twice the ~2.2 A start height, well
   beyond any C/O-surface contact); the table shows how much the conclusions
   depend on it.
-* ``md/<material>/md_nearest_site_occupancy.png`` (optional): nearest site
+* ``OUT/md/<material>/md_nearest_site_occupancy.png`` (optional, not with ``--no-plot``): nearest site
   against time, one panel per trajectory.
 """
 
@@ -265,7 +268,11 @@ def parse_args(argv=None) -> argparse.Namespace:
         "--output-dir",
         type=Path,
         default=None,
-        help="Directory of the run-level summary and plot (default: --results-dir).",
+        help=(
+            "Directory of md_trajectory_analysis_summary.csv, md_desorption_sensitivity.csv and "
+            "md/<material>/md_nearest_site_occupancy.png (default: --results-dir). The per-frame "
+            "md/<material>/<site>/md_frame_analysis.csv files are always written in --results-dir."
+        ),
     )
     parser.add_argument("--no-plot", action="store_true", help="Do not write the occupancy plot.")
     return parser.parse_args(argv)
