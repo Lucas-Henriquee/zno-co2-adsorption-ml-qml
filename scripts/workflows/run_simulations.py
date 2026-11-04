@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import fcntl
 import hashlib
 import json
 import os
@@ -14,7 +15,7 @@ import sys
 from datetime import datetime, timezone
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
-from typing import Any
+from typing import IO, Any
 
 import yaml
 
@@ -24,6 +25,7 @@ from scripts.workflows.active_environment import active_environment
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG = PROJECT_ROOT / "configs" / "simulations" / "zno_production.yaml"
+LOCK_NAME = ".run_simulations.lock"
 METHOD_ORDER = ("geometry", "dft", "tddft", "co2rr", "md", "neb")
 METHOD_ALIASES = {"pathways": "co2rr"}
 DEPENDENCIES = {
@@ -237,6 +239,13 @@ def positive_int(settings: dict[str, Any], key: str, method: str) -> int:
     return value
 
 
+def non_negative_int(settings: dict[str, Any], key: str, method: str) -> int:
+    value = int(required_value(settings, key, method))
+    if value < 0:
+        fail(f"methods.{method}.{key} must be a non-negative integer.")
+    return value
+
+
 def file_sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -323,7 +332,8 @@ def build_commands(
             *prefix,
             "--materials", *materials,
             "--sites", *sites,
-            "--max-transitions", str(positive_int(settings, "max_transitions", method)),
+            # 0 = every computed transition (run_tddft writes all of them).
+            "--max-transitions", str(non_negative_int(settings, "max_transitions", method)),
             "--osc-threshold", str(positive_float(settings, "oscillator_strength_threshold", method)),
             "--grid-spacing", str(positive_float(settings, "grid_spacing_angstrom", method)),
             "--box-size", str(positive_float(settings, "box_size_angstrom", method)),
@@ -479,6 +489,38 @@ def verify_method_outputs(method: str, run_dir: Path, materials: list[str], site
         raise RuntimeError(f"dft exited 0 but these cases are not ok: {', '.join(not_ok)}")
 
 
+def acquire_run_lock(run_dir: Path) -> IO[str]:
+    """Exclusive, non-blocking flock on RUN/.run_simulations.lock for the whole invocation.
+
+    A second run_simulations on the same run (e.g. a concurrent --resume --retry-failed,
+    which would archive the live run's outputs) stops here. The kernel drops the lock
+    when the process exits, also after a crash.
+    """
+    path = run_dir / LOCK_NAME
+    handle = path.open("a+", encoding="utf-8")
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        handle.seek(0)
+        holder = handle.read().strip()
+        handle.close()
+        fail(f"another run_simulations is using this run ({path}; held by {holder or 'unknown process'}).")
+    handle.seek(0)
+    handle.truncate()
+    handle.write(f"pid {os.getpid()} on {platform.node()} since {utc_now()}\n")
+    handle.flush()
+    return handle
+
+
+def release_run_lock(handle: IO[str] | None) -> None:
+    if handle is None or handle.closed:
+        return
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    finally:
+        handle.close()
+
+
 def main() -> None:
     args = parse_args()
     if args.list_methods:
@@ -557,140 +599,146 @@ def main() -> None:
         print("[dry-run] Validation completed; no directories or result files were created.")
         return
 
-    if args.resume:
-        if not manifest_path.is_file():
-            fail(
-                f"Cannot resume because the manifest does not exist: {manifest_path}. "
-                "For a run below another output root, pass --config <run directory>/config.yaml."
-            )
-        with manifest_path.open("r", encoding="utf-8") as handle:
-            manifest = json.load(handle)
-        immutable_context = {
-            "config_sha256": config_hash,
-            "environment": environment_name,
-            "versions": current_versions,
-            "materials": materials,
-            "sites": sites,
-            "mpi_processes": mpi_processes,
-            "omp_num_threads": omp_threads,
-        }
-        hints = {
-            "config_sha256": f" Omit --config, or pass the run's own snapshot {run_dir / 'config.yaml'}.",
-            "environment": " Run in the environment the run was started in, or set "
-            "QML_ZNO_ACTIVE_ENVIRONMENT to the recorded name if it is the same environment.",
-        }
-        for key, expected in immutable_context.items():
-            if manifest.get(key) != expected:
-                fail(
-                    f"Cannot resume with a different {key}. "
-                    f"Existing={manifest.get(key)!r}, requested={expected!r}.{hints.get(key, '')}"
-                )
-        previous_selected = [str(item) for item in manifest.get("selected_methods", [])]
-        previous_resolved = [str(item) for item in manifest.get("resolved_methods", [])]
-        manifest["selected_methods"] = list(dict.fromkeys([*previous_selected, *selected_methods]))
-        manifest["resolved_methods"] = [
-            method for method in METHOD_ORDER if method in {*previous_resolved, *resolved_methods}
-        ]
-    else:
-        if run_dir.exists():
-            fail(f"Run directory already exists; choose another --run-id: {run_dir}")
-        (run_dir / "logs").mkdir(parents=True)
-        (run_dir / "data" / "geometries").mkdir(parents=True)
-        shutil.copy2(config_path, run_dir / "config.yaml")
-        manifest = {
-            "schema_version": 1,
-            "run_id": run_id,
-            "created_at": utc_now(),
-            "updated_at": utc_now(),
-            "status": "planned",
-            "config_path": config["_config_path"],
-            "config_snapshot": str(run_dir / "config.yaml"),
-            "config_sha256": config_hash,
-            "environment": environment_name,
-            "versions": current_versions,
-            "selected_methods": selected_methods,
-            "resolved_methods": resolved_methods,
-            "materials": materials,
-            "sites": sites,
-            "mpi_processes": mpi_processes,
-            "omp_num_threads": omp_threads,
-            "paths": {
-                "run_directory": str(run_dir),
-                "geometry_directory": str(run_dir / "data" / "geometries"),
-                "log_directory": str(run_dir / "logs"),
-            },
-            "methods": {},
-        }
-        write_manifest(manifest_path, manifest)
-
-    runtime_environment = os.environ.copy()
-    runtime_environment["QML_ZNO_RESULTS_DIR"] = str(run_dir)
-    runtime_environment["QML_ZNO_GEOMETRY_DIR"] = str(run_dir / "data" / "geometries")
-    runtime_environment["OMP_NUM_THREADS"] = str(omp_threads)
-    runtime_environment["PYTHONUNBUFFERED"] = "1"
-    existing_python_path = runtime_environment.get("PYTHONPATH", "")
-    runtime_environment["PYTHONPATH"] = os.pathsep.join(
-        item for item in [str(PROJECT_ROOT), existing_python_path] if item
-    )
-
-    manifest["status"] = "running"
-    write_manifest(manifest_path, manifest)
-
+    lock = None
     try:
-        for method in resolved_methods:
-            previous_status = manifest.get("methods", {}).get(method, {}).get("status")
-            if previous_status == "completed":
-                print(f"[skip] {method} is already completed in this run.")
-                continue
-            previous_attempts: list[dict[str, Any]] = []
-            if previous_status in {"running", "failed"}:
-                if not args.retry_failed:
-                    fail(
-                        f"Method '{method}' has status '{previous_status}'. Start a new run ID, or pass "
-                        "--retry-failed to archive its partial outputs and run it again."
-                    )
-                previous = manifest["methods"][method]
-                previous["archived_to"] = str(archive_method_outputs(run_dir, method))
-                previous_attempts = [*previous.pop("previous_attempts", []), previous]
-                print(f"[retry] {method} was '{previous_status}'; outputs archived to {previous['archived_to']}")
-
-            method_record = {
-                "status": "running",
-                "started_at": utc_now(),
-                "commands": commands_by_method[method],
+        if args.resume:
+            if not manifest_path.is_file():
+                fail(
+                    f"Cannot resume because the manifest does not exist: {manifest_path}. "
+                    "For a run below another output root, pass --config <run directory>/config.yaml."
+                )
+            lock = acquire_run_lock(run_dir)
+            with manifest_path.open("r", encoding="utf-8") as handle:
+                manifest = json.load(handle)
+            immutable_context = {
+                "config_sha256": config_hash,
+                "environment": environment_name,
+                "versions": current_versions,
+                "materials": materials,
+                "sites": sites,
+                "mpi_processes": mpi_processes,
+                "omp_num_threads": omp_threads,
             }
-            if previous_attempts:
-                method_record["previous_attempts"] = previous_attempts
-            manifest.setdefault("methods", {})[method] = method_record
+            hints = {
+                "config_sha256": f" Omit --config, or pass the run's own snapshot {run_dir / 'config.yaml'}.",
+                "environment": " Run in the environment the run was started in, or set "
+                "QML_ZNO_ACTIVE_ENVIRONMENT to the recorded name if it is the same environment.",
+            }
+            for key, expected in immutable_context.items():
+                if manifest.get(key) != expected:
+                    fail(
+                        f"Cannot resume with a different {key}. "
+                        f"Existing={manifest.get(key)!r}, requested={expected!r}.{hints.get(key, '')}"
+                    )
+            previous_selected = [str(item) for item in manifest.get("selected_methods", [])]
+            previous_resolved = [str(item) for item in manifest.get("resolved_methods", [])]
+            manifest["selected_methods"] = list(dict.fromkeys([*previous_selected, *selected_methods]))
+            manifest["resolved_methods"] = [
+                method for method in METHOD_ORDER if method in {*previous_resolved, *resolved_methods}
+            ]
+        else:
+            if run_dir.exists():
+                fail(f"Run directory already exists; choose another --run-id: {run_dir}")
+            (run_dir / "logs").mkdir(parents=True)
+            lock = acquire_run_lock(run_dir)
+            (run_dir / "data" / "geometries").mkdir(parents=True)
+            shutil.copy2(config_path, run_dir / "config.yaml")
+            manifest = {
+                "schema_version": 1,
+                "run_id": run_id,
+                "created_at": utc_now(),
+                "updated_at": utc_now(),
+                "status": "planned",
+                "config_path": config["_config_path"],
+                "config_snapshot": str(run_dir / "config.yaml"),
+                "config_sha256": config_hash,
+                "environment": environment_name,
+                "versions": current_versions,
+                "selected_methods": selected_methods,
+                "resolved_methods": resolved_methods,
+                "materials": materials,
+                "sites": sites,
+                "mpi_processes": mpi_processes,
+                "omp_num_threads": omp_threads,
+                "paths": {
+                    "run_directory": str(run_dir),
+                    "geometry_directory": str(run_dir / "data" / "geometries"),
+                    "log_directory": str(run_dir / "logs"),
+                },
+                "methods": {},
+            }
             write_manifest(manifest_path, manifest)
 
-            log_path = run_dir / "logs" / f"{method}.log"
-            try:
-                for dependency in DEPENDENCIES[method]:
-                    if manifest.get("methods", {}).get(dependency, {}).get("status") != "completed":
-                        raise RuntimeError(f"{method} requires completed {dependency} in this run.")
-                for command in commands_by_method[method]:
-                    run_command(command, log_path, runtime_environment)
-                verify_method_outputs(method, run_dir, materials, sites)
-            except BaseException as exc:
-                method_record["status"] = "failed"
-                method_record["failed_at"] = utc_now()
-                method_record["error"] = f"{type(exc).__name__}: {exc}"
+        runtime_environment = os.environ.copy()
+        runtime_environment["QML_ZNO_RESULTS_DIR"] = str(run_dir)
+        runtime_environment["QML_ZNO_GEOMETRY_DIR"] = str(run_dir / "data" / "geometries")
+        runtime_environment["OMP_NUM_THREADS"] = str(omp_threads)
+        runtime_environment["PYTHONUNBUFFERED"] = "1"
+        existing_python_path = runtime_environment.get("PYTHONPATH", "")
+        runtime_environment["PYTHONPATH"] = os.pathsep.join(
+            item for item in [str(PROJECT_ROOT), existing_python_path] if item
+        )
+
+        manifest["status"] = "running"
+        write_manifest(manifest_path, manifest)
+
+        try:
+            for method in resolved_methods:
+                previous_status = manifest.get("methods", {}).get(method, {}).get("status")
+                if previous_status == "completed":
+                    print(f"[skip] {method} is already completed in this run.")
+                    continue
+                previous_attempts: list[dict[str, Any]] = []
+                if previous_status in {"running", "failed"}:
+                    if not args.retry_failed:
+                        fail(
+                            f"Method '{method}' has status '{previous_status}'. Start a new run ID, or pass "
+                            "--retry-failed to archive its partial outputs and run it again."
+                        )
+                    previous = manifest["methods"][method]
+                    previous["archived_to"] = str(archive_method_outputs(run_dir, method))
+                    previous_attempts = [*previous.pop("previous_attempts", []), previous]
+                    print(f"[retry] {method} was '{previous_status}'; outputs archived to {previous['archived_to']}")
+
+                method_record = {
+                    "status": "running",
+                    "started_at": utc_now(),
+                    "commands": commands_by_method[method],
+                }
+                if previous_attempts:
+                    method_record["previous_attempts"] = previous_attempts
+                manifest.setdefault("methods", {})[method] = method_record
                 write_manifest(manifest_path, manifest)
-                raise
 
-            method_record["status"] = "completed"
-            method_record["completed_at"] = utc_now()
+                log_path = run_dir / "logs" / f"{method}.log"
+                try:
+                    for dependency in DEPENDENCIES[method]:
+                        if manifest.get("methods", {}).get(dependency, {}).get("status") != "completed":
+                            raise RuntimeError(f"{method} requires completed {dependency} in this run.")
+                    for command in commands_by_method[method]:
+                        run_command(command, log_path, runtime_environment)
+                    verify_method_outputs(method, run_dir, materials, sites)
+                except BaseException as exc:
+                    method_record["status"] = "failed"
+                    method_record["failed_at"] = utc_now()
+                    method_record["error"] = f"{type(exc).__name__}: {exc}"
+                    write_manifest(manifest_path, manifest)
+                    raise
+
+                method_record["status"] = "completed"
+                method_record["completed_at"] = utc_now()
+                write_manifest(manifest_path, manifest)
+
+            manifest["status"] = "completed"
             write_manifest(manifest_path, manifest)
-
-        manifest["status"] = "completed"
-        write_manifest(manifest_path, manifest)
-        print(f"[done] Simulation workflow completed: {run_dir}")
-    except BaseException as exc:
-        manifest["status"] = "failed"
-        manifest["error"] = f"{type(exc).__name__}: {exc}"
-        write_manifest(manifest_path, manifest)
-        raise
+            print(f"[done] Simulation workflow completed: {run_dir}")
+        except BaseException as exc:
+            manifest["status"] = "failed"
+            manifest["error"] = f"{type(exc).__name__}: {exc}"
+            write_manifest(manifest_path, manifest)
+            raise
+    finally:
+        release_run_lock(lock)
 
 
 if __name__ == "__main__":

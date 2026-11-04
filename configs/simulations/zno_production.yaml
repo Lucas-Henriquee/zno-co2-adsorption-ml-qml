@@ -55,8 +55,9 @@ methods:
   # It is not the optical response of ZnO-CO2; do not compare it with a
   # photocatalyst onset target. All energies are written in eV.
   tddft:
-    # Lowest transitions written to transitions.csv (descriptors and TRK use all of them).
-    max_transitions: 50
+    # Transitions written to transitions.csv: 0 = all computed transitions (Fig. 4 is drawn
+    # up to the last one; the descriptors and the TRK sum always use all of them).
+    max_transitions: 0
     # First bright excitation = lowest transition with oscillator strength f >= threshold.
     oscillator_strength_threshold: 0.001
     grid_spacing_angstrom: 0.25

@@ -22,6 +22,7 @@ RUN=results/simulations/<run-id>
 DATASET=data/generated/<dataset-run-id>/multitech/md_window_unique_dataset.csv
 ./run_simulations.sh all --dry-run
 ./run_analysis.sh science --scientific-results $RUN --dry-run
+./run_analysis.sh paper --scientific-results $RUN --dry-run
 ./run_datasets.sh tddft multitech --source-results $RUN --dry-run
 ./run_models.sh local --dataset $DATASET --dry-run
 ./run_models.sh ibm-plan --config configs/models/zno_ibm_plan.yaml --dataset $DATASET --dry-run

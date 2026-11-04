@@ -101,7 +101,7 @@ python -m pip install -r requirements-dev.txt        # + scikit-learn, pytest
 ./scripts/environment/check_environment.sh analysis --python .venv/bin/python
 ```
 
-The launchers need a package manager. In a venv, call the modules from the repository
+The launchers need a package manager to run (`--help` works without one). In a venv, call the modules from the repository
 root with the launcher arguments, e.g. `python -m scripts.workflows.run_analysis --help`.
 `run_all` calls the stage launchers, so it needs a package manager also when started
 with `python -m`. GPAW with MPI comes only from `simulation.yaml`.

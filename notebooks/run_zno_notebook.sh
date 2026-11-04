@@ -34,11 +34,6 @@ run_in_env "${ENVIRONMENT_NAME}" python -c 'import nbconvert, nbclient, ipykerne
         Run the notebook interactively, or the same methods with the root launchers."
 
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}"
-set_target "${ENVIRONMENT_NAME}"
-if [[ "${MANAGER_KIND}" == "conda" ]]; then
-  RUN=("${MANAGER}" run --no-capture-output "${TARGET[@]}")
-else
-  RUN=("${MANAGER}" run "${TARGET[@]}")
-fi
-exec "${RUN[@]}" python -m nbconvert --to notebook --execute "${INPUT_NOTEBOOK}" \
+set_run_prefix "${ENVIRONMENT_NAME}"
+exec "${RUN_PREFIX[@]}" python -m nbconvert --to notebook --execute "${INPUT_NOTEBOOK}" \
   --output "${OUTPUT_NOTEBOOK}" --ExecutePreprocessor.timeout="${NB_TIMEOUT}"

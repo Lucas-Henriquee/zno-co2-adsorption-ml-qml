@@ -44,10 +44,12 @@ Each run writes to its own run directory, named by `--run-id` (default: next fre
 # Status dashboard (read-only), inside the simulation environment
 python -m scripts.workflows.run_status zno_run_01
 
-# Analyses of a finished run
-./run_analysis.sh science --scientific-results results/simulations/zno_run_01 \
-  --run-id zno_run_01_science
+# Paper figures and tables of a finished (or running) run
+./run_analysis.sh paper --scientific-results results/simulations/zno_run_01 \
+  --run-id zno_run_01_paper
 ```
+
+`./run_<stage>.sh --help` prints the launcher usage without conda.
 
 `--resume` skips completed methods and refuses failed or interrupted ones; see
 [docs/simulations.md](docs/simulations.md) for resume rules and all options.
@@ -71,7 +73,7 @@ Example, lab PC with a single environment `gpaw-dft`:
 
 ```bash
 QML_ZNO_SIM_ENV=gpaw-dft ./run_simulations.sh all --run-id zno_run_01 --dry-run
-QML_ZNO_ANALYSIS_ENV=gpaw-dft ./run_analysis.sh science \
+QML_ZNO_ANALYSIS_ENV=gpaw-dft ./run_analysis.sh paper \
   --scientific-results results/simulations/zno_run_01 --dry-run
 ```
 

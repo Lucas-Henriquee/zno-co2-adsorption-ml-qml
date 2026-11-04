@@ -1,4 +1,9 @@
-"""Publication figures from the tables of analysis_co2_reduction.py.
+"""Retired first-campaign screening figures (the former run_analysis method science_figures).
+
+Kept for provenance; not run by any workflow. The paper figures are drawn by
+scripts/visualization/paper_figures.py.
+
+Publication figures from the tables of analysis_co2_reduction.py.
 
 fig01 adsorption-energy heatmap (rows with quality_flag/dft_status ok only), fig02 CO2
 activation (C-O stretch against the run's gas-phase CO2 baseline, O-C-O bend), fig03

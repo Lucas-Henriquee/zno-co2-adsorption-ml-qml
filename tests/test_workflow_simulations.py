@@ -165,6 +165,31 @@ class RetryFailedTests(unittest.TestCase):
         self.assertFalse((run_dir / "tddft_summary.csv").exists())
         self.assertEqual(manifest["methods"]["dft"]["status"], "completed")
 
+    def test_lock_blocks_a_second_invocation_and_is_released(self):
+        import fcntl
+
+        error, manifest, run_dir = self.main(self.TDDFT_FAIL)
+        self.assertIsNotNone(error)
+        lock_path = run_dir / simulations.LOCK_NAME
+        self.assertTrue(lock_path.is_file())
+        # Released after the first invocation: another process can take it.
+        with lock_path.open("a") as handle:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+        # Held by a live invocation (simulated by another open file description).
+        with lock_path.open("a") as holder:
+            fcntl.flock(holder.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            error, manifest, _ = self.main("pass", "--resume", "--retry-failed")
+            self.assertIn("another run_simulations is using this run", str(error))
+            # Nothing was archived or retried while the lock was held.
+            self.assertEqual(manifest["methods"]["tddft"]["status"], "failed")
+            self.assertTrue((run_dir / "tddft_summary.csv").exists())
+
+        error, manifest, _ = self.main("pass", "--resume", "--retry-failed")
+        self.assertIsNone(error)
+        self.assertEqual(manifest["methods"]["tddft"]["status"], "completed")
+
     def test_retry_failed_requires_resume(self):
         with mock.patch.object(sys, "argv", ["run_simulations", "dft", "--retry-failed"]), \
                 contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):

@@ -9,8 +9,14 @@ One directory per run of `./run_analysis.sh`.
 ├── logs/
 ├── science/
 │   ├── screening/
+│   ├── co2rr/
 │   ├── co2_reduction/
-│   └── figures/
+│   ├── neb/
+│   ├── md/
+│   └── structures/
+├── paper/
+│   ├── fig01_pymol/
+│   └── figure_registry.csv
 └── models/
     ├── tables/
     └── figures/

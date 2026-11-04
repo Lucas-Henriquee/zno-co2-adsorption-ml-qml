@@ -1,20 +1,17 @@
-"""CO2-reduction analysis tables and publication figures without the removed proxy score."""
+"""CO2-reduction analysis tables (co2_reduction) without the removed proxy score.
+
+The screening figures of render_publication_figures were retired to scripts/legacy/.
+"""
 
 import contextlib
-import csv
 import io
 import math
-
-import matplotlib
-
-matplotlib.use("Agg")
 
 import pytest
 from ase import Atoms
 from ase.io import write
 
 from scripts.analysis import analysis_co2_reduction as analysis
-from scripts.visualization import render_publication_figures as figures
 
 
 def _dft_row(site, eads, status="ok", profile="base", bond=1.20):
@@ -89,8 +86,6 @@ def test_tddft_renamed_columns_with_fallback():
     assert rows["top_metal"]["co2_isolated_first_bright_excitation_ev"] == 8.5
     assert rows["bridge"]["co2_isolated_first_bright_excitation_ev"] == 8.7
     assert "co2_isolated_total_f" not in rows["top_metal"]
-    assert figures.co2_onset({"co2_isolated_first_bright_excitation_ev": "8.7"}) == 8.7
-    assert figures.co2_onset({"co2_isolated_onset_ev": "8.5"}) == 8.5
 
 
 def test_ranking_only_by_limiting_potential():
@@ -109,67 +104,3 @@ def test_ranking_only_by_limiting_potential():
     ]
     ranking = analysis.build_figure_tables(ranked)["figure_site_ranking.csv"]
     assert ranking[0]["limiting_potential_v"] == -0.6
-
-
-@pytest.fixture
-def captured(monkeypatch, tmp_path):
-    figs = {}
-
-    def fake_save(fig, base_name, plt):
-        figs[base_name] = fig
-
-    monkeypatch.setattr(figures, "save_figure", fake_save)
-    monkeypatch.setattr(figures, "TDDFT_RESULTS_DIR", tmp_path / "tddft")
-    return figs
-
-
-def _table_rows():
-    rows = analysis.merge_dft_tddft(
-        [_dft_row("top_metal", -0.4), _dft_row("bridge", 0.02),
-         {**_dft_row("top_oxygen", -2.0, status="clean_failed")}], [],
-        co2_baseline=lambda profile: (1.176, "test"),
-    )
-    table = [
-        {"material": "ZnO", "site": "top_metal", "pathway_validity": "ok", "limiting_potential_v": -1.0},
-        {"material": "ZnO", "site": "bridge", "pathway_validity": "unbound", "limiting_potential_v": float("nan")},
-    ]
-    rows = analysis.attach_limiting_potentials(rows, table)
-    return [{key: str(value) for key, value in row.items()} for row in rows]
-
-
-def test_heatmap_skips_rows_that_are_not_ok(captured):
-    import matplotlib.pyplot as plt
-    from matplotlib import ticker
-    from matplotlib.colors import Normalize
-
-    figures.figure_adsorption_heatmap(_table_rows(), plt, Normalize, ticker)
-    ax = captured["fig01_adsorption_heatmap"].axes[0]
-    labels = [tick.get_text() for tick in ax.get_xticklabels()]
-    assert "Top oxygen" not in labels  # dft_status clean_failed
-    texts = [text.get_text() for text in ax.texts]
-    assert "-2.00" not in texts and "0.02*" in texts
-
-
-def test_ranking_and_spectra_figures_do_not_need_a_score(captured, tmp_path):
-    import matplotlib.pyplot as plt
-    from matplotlib import patches
-
-    rows = _table_rows()
-    figures.figure_site_ranking(rows, plt, patches)
-    ax = captured["fig04_site_ranking"].axes[0]
-    assert [tick.get_text() for tick in ax.get_yticklabels()] == ["ZnO | Top metal"]
-    assert "Limiting potential" in ax.get_xlabel()
-
-    for site in ("top_metal", "bridge"):
-        folder = tmp_path / "tddft" / "ZnO" / site
-        folder.mkdir(parents=True)
-        with (folder / "transitions.csv").open("w", newline="") as handle:
-            writer = csv.DictWriter(handle, fieldnames=["energy_ev", "oscillator_strength"])
-            writer.writeheader()
-            writer.writerow({"energy_ev": 8.5, "oscillator_strength": 0.1})
-    figures.figure_tddft_gaussian_spectra(rows, plt)
-    ax = captured["fig05_tddft_gaussian_spectra"].axes[0]
-    assert len(ax.lines) == 2  # every ok site, not one "best" site per oxide
-    assert "Isolated CO2 (Adsorbed Geometry)" in ax.get_title()
-    assert "eV" in ax.get_ylabel()
-    assert any("0.10 eV" in text.get_text() and "dimensionless" in text.get_text() for text in ax.texts)

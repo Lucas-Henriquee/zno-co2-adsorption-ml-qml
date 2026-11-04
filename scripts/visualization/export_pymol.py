@@ -13,20 +13,27 @@ For every site with ``dft_status`` ok in ``--summary`` it reads
   threshold computed from each structure and written into the script) and CO2 are shown;
   commented ``ray``/``png`` lines save ``fig01_<site>.png``;
 * ``fig01_<site>.png`` and ``fig01_adsorption_structures.png`` (panels side by side,
-  labelled (a), (b), (c)), drawn by the renderer chosen with ``--render``:
+  labelled (a), (b), (c); C-O lengths written beside the bonds), and
+  ``fig01_<site>_contact.png`` and ``fig01_adsorption_structures_contact.png`` (the same
+  views; instead of the C-O lengths, the shortest CO2-surface contact: a thin dashed line
+  from the CO2 atom to the slab atom, minimum image, with its length in A), drawn by the
+  renderer chosen with ``--render``:
 
   - ``pymol``: PyMOL (``pymol-open-source`` as a Python package) run headless, executing
     the same commands as the ``.pml`` (one command list drives both);
   - ``ase``: a ball-and-stick renderer that needs only ASE + matplotlib (same atoms, same
-    orientation, element colours, sticks, C-O lengths);
+    orientation, element colours, sticks, C-O lengths or contact line);
   - ``auto`` (default): ``pymol`` when ``import pymol`` works, else ``ase``;
   - ``none``: no PNG (structures + script only);
-* ``render_info.json``: the renderer used and the PNG names;
+* ``render_info.json``: the renderer used and the PNG names (``panels`` / ``combined`` for the
+  C-O variant, ``panels_contact`` / ``combined_contact`` for the contact variant, with the
+  contact pair and distance of every site);
 * ``README.txt``: the files and how to re-render in PyMOL.
 
 The surface threshold is the midpoint of the first gap larger than ``--layer-gap`` (A)
 below the topmost slab atom; without such a gap it is 1 A below the topmost slab atom.
-The CO2 molecule is the last three atoms (O, C, O), as written by the DFT stage.
+The CO2 molecule is the last three atoms (O, C, O), as written by the DFT stage. The slab
+atom of the shortest contact is always shown, also when it lies below the threshold.
 """
 from __future__ import annotations
 
@@ -39,13 +46,17 @@ from pathlib import Path
 import numpy as np
 from ase import Atoms
 from ase.data import atomic_numbers, covalent_radii
-from ase.geometry import find_mic
+from ase.geometry import find_mic, get_distances
 from ase.io import read, write
 
 SITE_ORDER = ("top_metal", "top_oxygen", "bridge")
 SITE_TITLES = {"top_metal": "Top metal", "top_oxygen": "Top oxygen", "bridge": "Bridge"}
 PML_NAME = "fig01_adsorption_structures.pml"
 COMBINED_NAME = "fig01_adsorption_structures.png"
+CONTACT_COMBINED_NAME = "fig01_adsorption_structures_contact.png"
+VARIANTS = ("co", "contact")  # C-O length labels / shortest CO2-surface contact
+COMBINED_NAMES = {"co": COMBINED_NAME, "contact": CONTACT_COMBINED_NAME}
+LEGEND_NOTES = {"co": "C–O lengths in Å", "contact": "dashed: shortest CO$_2$–surface contact (Å)"}
 RENDER_INFO_NAME = "render_info.json"
 README_NAME = "README.txt"
 RENDERERS = ("auto", "pymol", "ase", "none")
@@ -61,10 +72,14 @@ ELEMENT_COLORS = {
     "O": (0.80, 0.22, 0.24),
     "C": (0.25, 0.26, 0.29),
 }
-STICK_GREY = 0.70  # PyMOL grey70
 STICK_RADIUS_ANG = 0.12
 SPHERE_SCALE = 0.38  # ase renderer: sphere radius = SPHERE_SCALE * covalent radius
 BOND_TOLERANCE = 1.15  # bond when d < BOND_TOLERANCE * (sum of covalent radii)
+CONTACT_LINE_COLOR = (0.15, 0.15, 0.15)
+
+
+def panel_name(site: str, variant: str = "co") -> str:
+    return f"fig01_{site}.png" if variant == "co" else f"fig01_{site}_contact.png"
 
 
 def parse_args(argv=None) -> argparse.Namespace:
@@ -135,6 +150,27 @@ def surface_threshold(z_slab: np.ndarray, layer_gap: float = DEFAULT_LAYER_GAP_A
         if upper - lower > layer_gap:
             return float(0.5 * (upper + lower))
     return float(levels[0] - FALLBACK_DEPTH_ANG)
+
+
+def shortest_contact(atoms: Atoms, positions: np.ndarray) -> dict:
+    """Shortest distance from any CO2 atom (last three) to any slab atom, minimum image.
+
+    ``positions`` are the coordinates as written to the PDB (pdb_positions); the endpoint is
+    the slab atom's image nearest to the CO2 atom in that frame and ``in_cell`` tells whether
+    that image is the atom itself (PyMOL draws to the atom, without periodic images).
+    """
+    slab = len(atoms) - 3
+    cell = atoms.cell.standard_form()[0] if atoms.get_pbc().any() else atoms.cell
+    vectors, distances = get_distances(positions[slab:], positions[:slab], cell=cell, pbc=atoms.get_pbc())
+    k, j = np.unravel_index(int(np.argmin(distances)), distances.shape)
+    co2_index = slab + int(k)
+    endpoint = positions[co2_index] + vectors[k, j]
+    symbols = atoms.get_chemical_symbols()
+    return {
+        "co2_index": co2_index, "slab_index": int(j), "distance": float(distances[k, j]),
+        "endpoint": endpoint, "in_cell": bool(np.allclose(endpoint, positions[j], atol=1e-3)),
+        "pair": f"{symbols[co2_index]}–{symbols[j]}",
+    }
 
 
 def write_structure(atoms: Atoms, output_dir: Path, site: str) -> tuple[Path, Path]:
@@ -229,6 +265,19 @@ def scene_commands(entries: list[dict], tilt_deg: float) -> list[tuple]:
             # before the distance objects are made so that they follow the atoms).
             _cmd("rotate", "x", float(round(-(90.0 - tilt_deg), 1)), site, camera=0, origin=[0, 0, 0]),
         ]
+        contact = entry["contact"]
+        ops += [
+            ("#", f"shortest CO2-surface contact {contact['pair']} {contact['distance']:.2f} A "
+                  "(fig01_<site>_contact.png)"),
+            _cmd("distance", f"{site}_dist_contact", f"{site} and id {contact['co2_index'] + 1}",
+                 f"{site} and id {contact['slab_index'] + 1}"),
+            _cmd("set", "dash_gap", 0.15, f"{site}_dist_contact"),
+            _cmd("set", "dash_length", 0.15, f"{site}_dist_contact"),
+            _cmd("set", "dash_radius", 0.03, f"{site}_dist_contact"),
+            _cmd("set", "dash_color", "grey20", f"{site}_dist_contact"),
+            _cmd("set", "label_distance_digits", 2, f"{site}_dist_contact"),
+            _cmd("show", "labels", f"{site}_dist_contact"),
+        ]
         for k, (o_id, length) in enumerate(zip(entry["o_ids"], entry["co_lengths"]), start=1):
             ops += [
                 ("#", f"C-O length {length:.3f} A"),
@@ -243,9 +292,10 @@ def scene_commands(entries: list[dict], tilt_deg: float) -> list[tuple]:
     return ops
 
 
-def view_commands(site: str) -> list[tuple]:
-    """Show one site alone with the common view."""
-    return [_cmd("disable"), _cmd("enable", site), _cmd("enable", f"{site}_dist_co*"),
+def view_commands(site: str, variant: str = "co") -> list[tuple]:
+    """Show one site alone with the common view: C-O labels (co) or the contact line (contact)."""
+    distances = f"{site}_dist_co*" if variant == "co" else f"{site}_dist_contact"
+    return [_cmd("disable"), _cmd("enable", site), _cmd("enable", distances),
             _cmd("reset"), _cmd("zoom", f"{site}_shown", ZOOM_BUFFER_ANG)]
 
 
@@ -265,8 +315,10 @@ def pml_script(entries: list[dict], tilt_deg: float, dpi: int = DEFAULT_DPI) -> 
     ]
     for entry in entries:
         site = entry["site"]
-        lines.append(f"# ---- render {site} (uncomment to save fig01_{site}.png)")
-        lines += ["# " + pml_line(op) for op in view_commands(site) + save_commands(f"fig01_{site}.png", dpi)]
+        for variant in VARIANTS:
+            png = panel_name(site, variant)
+            lines.append(f"# ---- render {site} (uncomment to save {png})")
+            lines += ["# " + pml_line(op) for op in view_commands(site, variant) + save_commands(png, dpi)]
     first = entries[0]["site"]
     lines += ["", f"# Interactive start: {first}", *(pml_line(op) for op in view_commands(first)), ""]
     return "\n".join(lines)
@@ -310,19 +362,21 @@ def run_pymol(cmd, ops: list[tuple], output_dir: Path) -> None:
         getattr(cmd, name)(*args, **kwargs)
 
 
-def render_pymol(entries: list[dict], output_dir: Path, tilt_deg: float, dpi: int) -> dict[str, Path]:
+def render_pymol(entries: list[dict], output_dir: Path, tilt_deg: float, dpi: int) -> dict[str, dict[str, Path]]:
+    """{variant: {site: panel PNG}} for both variants, from one PyMOL scene."""
     cmd, stop = _pymol_session()
-    panels = {}
+    panels: dict[str, dict[str, Path]] = {variant: {} for variant in VARIANTS}
     try:
         run_pymol(cmd, scene_commands(entries, tilt_deg), output_dir)
         for entry in entries:
             site = entry["site"]
-            name = f"fig01_{site}.png"
-            run_pymol(cmd, view_commands(site) + save_commands(name, dpi), output_dir)
-            panels[site] = output_dir / name
+            for variant in VARIANTS:
+                name = panel_name(site, variant)
+                run_pymol(cmd, view_commands(site, variant) + save_commands(name, dpi), output_dir)
+                panels[variant][site] = output_dir / name
     finally:
         stop()
-    missing = [str(p) for p in panels.values() if not p.is_file()]
+    missing = [str(p) for variant in panels.values() for p in variant.values() if not p.is_file()]
     if missing:
         raise SystemExit("[export-pymol] PyMOL wrote no " + ", ".join(missing))
     return panels
@@ -353,10 +407,15 @@ def projected(entry: dict, tilt_deg: float) -> dict:
     radii = np.array([SPHERE_SCALE * covalent_radii[atomic_numbers[s]] for s in symbols])
     lo = (xyz[:, :2] - radii[:, None]).min(axis=0)
     hi = (xyz[:, :2] + radii[:, None]).max(axis=0)
+    contact = entry["contact"]
     return {"xyz": xyz, "symbols": symbols, "radii": radii, "lo": lo, "hi": hi,
             "carbon": indices.index(entry["c_id"] - 1),
             "oxygens": [indices.index(o - 1) for o in entry["o_ids"]],
-            "co_lengths": entry["co_lengths"]}
+            "co_lengths": entry["co_lengths"],
+            "contact_atom": indices.index(contact["co2_index"]),
+            "contact_slab": indices.index(contact["slab_index"]),
+            "contact_end": contact["endpoint"] @ view_rotation(tilt_deg).T,
+            "contact_distance": contact["distance"], "contact_pair": contact["pair"]}
 
 
 @lru_cache(maxsize=None)
@@ -399,8 +458,53 @@ def _draw_stick(ax, p, q, zorder):
                              antialiased=True, zorder=zorder))
 
 
-def draw_structure(ax, view: dict, centre: np.ndarray, half: np.ndarray, label_size: float) -> None:
+def draw_co_labels(ax, view: dict, label_size: float, zorder: int) -> None:
+    """C-O lengths beside each bond, on opposite sides of the molecular axis."""
     from matplotlib import patheffects
+
+    xyz = view["xyz"]
+    carbon = xyz[view["carbon"], :2]
+    o1, o2 = (xyz[o, :2] for o in view["oxygens"])
+    axis = o2 - o1
+    axis = axis / np.linalg.norm(axis) if np.linalg.norm(axis) > 1e-6 else np.array([0.0, 1.0])
+    normal = np.array([-axis[1], axis[0]])
+    if normal[0] < 0:
+        normal = -normal
+    for sign, oxygen, length in zip((-1.0, 1.0), (o1, o2), view["co_lengths"]):
+        anchor = 0.5 * (carbon + oxygen) + sign * 0.42 * normal
+        ax.text(anchor[0], anchor[1], f"{length:.3f}", ha="left" if sign > 0 else "right", va="center",
+                fontsize=label_size, color="black", zorder=zorder,
+                path_effects=[patheffects.withStroke(linewidth=2.0, foreground="white")])
+
+
+def draw_contact(ax, view: dict, label_size: float, zorder: int) -> None:
+    """Thin dashed line from the CO2 atom to the slab atom of the shortest contact, with its length."""
+    from matplotlib import patheffects
+
+    start = view["xyz"][view["contact_atom"], :2]
+    end = view["contact_end"][:2]
+    vector = end - start
+    length = np.linalg.norm(vector)
+    if length < 1e-6:
+        return
+    unit = vector / length
+    # From sphere surface to sphere surface (projected), so that the dashes are visible.
+    a = start + view["radii"][view["contact_atom"]] * unit
+    b = end - view["radii"][view["contact_slab"]] * unit
+    ax.plot([a[0], b[0]], [a[1], b[1]], linestyle=(0, (2.0, 1.6)), linewidth=0.9,
+            color=CONTACT_LINE_COLOR, zorder=zorder, solid_capstyle="butt")
+    normal = np.array([-unit[1], unit[0]])
+    if normal[0] < 0:
+        normal = -normal
+    anchor = 0.5 * (a + b) + 0.18 * normal
+    # The pair is named: in the side view another atom may lie on the line of sight.
+    ax.text(anchor[0], anchor[1], f"{view['contact_pair']} {view['contact_distance']:.2f} Å", ha="left", va="center",
+            fontsize=label_size, color="black", zorder=zorder + 1,
+            path_effects=[patheffects.withStroke(linewidth=2.0, foreground="white")])
+
+
+def draw_structure(ax, view: dict, centre: np.ndarray, half: np.ndarray, label_size: float,
+                   variant: str = "co") -> None:
     from matplotlib.patches import Circle
 
     xyz, radii, symbols = view["xyz"], view["radii"], view["symbols"]
@@ -427,27 +531,19 @@ def draw_structure(ax, view: dict, centre: np.ndarray, half: np.ndarray, label_s
         image.set_clip_path(clip)
         ax.add_patch(Circle((x, y), r, facecolor="none", edgecolor=tuple(0.55 * c for c in rgb),
                             linewidth=0.5, zorder=order))
-    # C-O lengths beside each bond, on opposite sides of the molecular axis.
-    carbon = xyz[view["carbon"], :2]
-    o1, o2 = (xyz[o, :2] for o in view["oxygens"])
-    axis = o2 - o1
-    axis = axis / np.linalg.norm(axis) if np.linalg.norm(axis) > 1e-6 else np.array([0.0, 1.0])
-    normal = np.array([-axis[1], axis[0]])
-    if normal[0] < 0:
-        normal = -normal
-    for sign, oxygen, length in zip((-1.0, 1.0), (o1, o2), view["co_lengths"]):
-        anchor = 0.5 * (carbon + oxygen) + sign * 0.42 * normal
-        ax.text(anchor[0], anchor[1], f"{length:.3f}", ha="left" if sign > 0 else "right", va="center",
-                fontsize=label_size, color="black", zorder=len(items) + 1,
-                path_effects=[patheffects.withStroke(linewidth=2.0, foreground="white")])
+    if variant == "contact":
+        draw_contact(ax, view, label_size, zorder=len(items) + 1)
+    else:
+        draw_co_labels(ax, view, label_size, zorder=len(items) + 1)
     ax.set_xlim(centre[0] - half[0], centre[0] + half[0])
     ax.set_ylim(centre[1] - half[1], centre[1] + half[1])
     ax.set_aspect("equal")
     ax.set_axis_off()
 
 
-def render_ase(entries: list[dict], output_dir: Path, tilt_deg: float, dpi: int) -> dict[str, Path]:
-    """Ball-and-stick panels with ASE + matplotlib; one common scale for every site."""
+def render_ase(entries: list[dict], output_dir: Path, tilt_deg: float, dpi: int) -> dict[str, dict[str, Path]]:
+    """{variant: {site: panel PNG}}: ball-and-stick panels with ASE + matplotlib, one common
+    scale for every site and both variants."""
     from matplotlib.backends.backend_agg import FigureCanvasAgg
     from matplotlib.figure import Figure
 
@@ -456,19 +552,20 @@ def render_ase(entries: list[dict], output_dir: Path, tilt_deg: float, dpi: int)
     half = np.max([0.5 * (v["hi"] - v["lo"]) for v in views], axis=0) + margin
     width_in = 2.4
     height_in = width_in * half[1] / half[0]
-    panels = {}
+    panels: dict[str, dict[str, Path]] = {variant: {} for variant in VARIANTS}
     for entry, view in zip(entries, views):
-        fig = Figure(figsize=(width_in, height_in))
-        FigureCanvasAgg(fig)
-        ax = fig.add_axes((0.0, 0.0, 1.0, 1.0))
-        draw_structure(ax, view, 0.5 * (view["lo"] + view["hi"]), half, label_size=8)
-        path = output_dir / f"fig01_{entry['site']}.png"
-        fig.savefig(path, dpi=dpi, facecolor="white")
-        panels[entry["site"]] = path
+        for variant in VARIANTS:
+            fig = Figure(figsize=(width_in, height_in))
+            FigureCanvasAgg(fig)
+            ax = fig.add_axes((0.0, 0.0, 1.0, 1.0))
+            draw_structure(ax, view, 0.5 * (view["lo"] + view["hi"]), half, label_size=8, variant=variant)
+            path = output_dir / panel_name(entry["site"], variant)
+            fig.savefig(path, dpi=dpi, facecolor="white")
+            panels[variant][entry["site"]] = path
     return panels
 
 
-def compose_figure(panels: dict[str, Path], output: Path, dpi: int) -> Path:
+def compose_figure(panels: dict[str, Path], output: Path, dpi: int, note: str = LEGEND_NOTES["co"]) -> Path:
     """Panels side by side, labelled (a), (b), ... below, with an element legend."""
     from matplotlib.backends.backend_agg import FigureCanvasAgg
     from matplotlib.figure import Figure
@@ -494,7 +591,7 @@ def compose_figure(panels: dict[str, Path], output: Path, dpi: int) -> Path:
     handles = [Line2D([], [], linestyle="none", marker="o", markersize=7, markerfacecolor=rgb,
                       markeredgecolor=tuple(0.55 * c for c in rgb), label=symbol)
                for symbol, rgb in ELEMENT_COLORS.items()]
-    handles.append(Line2D([], [], linestyle="none", label="C–O lengths in Å"))
+    handles.append(Line2D([], [], linestyle="none", label=note))
     fig.legend(handles=handles, loc="center", bbox_to_anchor=(0.5, 0.5 * legend_h / height_in),
                ncol=len(handles), frameon=False, fontsize=8, handletextpad=0.3, columnspacing=1.6)
     fig.savefig(output, dpi=dpi, facecolor="white")
@@ -519,8 +616,10 @@ Files
                             (sticks + spheres, element colours, white background, orthographic,
                             same tilted side view for every site, only the exposed surface
                             layer + CO2; the z threshold of each site is written in the script)
-  fig01_<site>.png          rendered panel of each site
+  fig01_<site>.png          rendered panel of each site (C-O lengths)
   {combined}   panels side by side, (a), (b), (c)
+  fig01_<site>_contact.png  the same view with the shortest CO2-surface contact (dashed, A)
+  {contact}   contact panels side by side
   {info}          renderer used (pymol = headless PyMOL running the commands of the
                             script; ase = ASE + matplotlib fallback with the same atoms and view)
 
@@ -532,7 +631,7 @@ Re-render interactively in PyMOL
   cd <this folder>
   pymol {pml}
 and uncomment the "render <site>" blocks at the end of the script
-(disable/enable/reset/zoom/ray/png); each writes fig01_<site>.png.
+(disable/enable/reset/zoom/ray/png); they write fig01_<site>.png and fig01_<site>_contact.png.
 """
 
 
@@ -572,30 +671,39 @@ def main(argv=None) -> int:
         threshold = surface_threshold(z[:slab], args.layer_gap)
         carbon = slab + 1
         surface = [i for i in range(slab) if z[i] > threshold]
+        contact = shortest_contact(atoms, positions)
+        if not contact["in_cell"]:
+            print(f"[export-pymol] {site}: the nearest slab atom of the contact is a periodic image; "
+                  "the PyMOL distance object is drawn to the atom in the cell")
+        shown_slab = surface if contact["slab_index"] in surface else sorted([*surface, contact["slab_index"]])
         entries.append({
             "site": site, "pdb": pdb.name, "threshold": threshold,
-            "surface_ids": [i + 1 for i in surface],
+            "surface_ids": [i + 1 for i in shown_slab],
             "c_id": carbon + 1, "o_ids": [slab + 1, slab + 3],
             "co_lengths": [float(atoms.get_distance(carbon, o)) for o in (slab, slab + 2)],
             "positions": positions, "symbols": atoms.get_chemical_symbols(),
-            "shown": [*surface, slab, slab + 1, slab + 2],
+            "shown": [*shown_slab, slab, slab + 1, slab + 2],
+            "contact": contact,
         })
         print(f"[export-pymol] {site}: wrote {pdb} and {cif} (surface z > {threshold:.3f} A, "
-              f"{len(surface)} slab atoms shown)")
+              f"{len(shown_slab)} slab atoms shown); shortest CO2-surface contact {contact['pair']} "
+              f"{contact['distance']:.3f} A")
     pml = output_dir / PML_NAME
     pml.write_text(pml_script(entries, args.tilt_deg, args.dpi), encoding="utf-8")
     print(f"[export-pymol] wrote {pml}")
 
-    panels: dict[str, Path] = {}
-    combined = None
+    panels: dict[str, dict[str, Path]] = {variant: {} for variant in VARIANTS}
+    combined: dict[str, Path | None] = {variant: None for variant in VARIANTS}
     if renderer == "pymol":
         panels = render_pymol(entries, output_dir, args.tilt_deg, args.dpi)
     elif renderer == "ase":
         panels = render_ase(entries, output_dir, args.tilt_deg, args.dpi)
-    if panels:
-        combined = compose_figure(panels, output_dir / COMBINED_NAME, args.dpi)
-        print(f"[export-pymol] renderer: {renderer} (requested {args.render}); wrote "
-              f"{', '.join(p.name for p in panels.values())} and {combined}")
+    if panels["co"]:
+        for variant in VARIANTS:
+            combined[variant] = compose_figure(panels[variant], output_dir / COMBINED_NAMES[variant], args.dpi,
+                                               LEGEND_NOTES[variant])
+            print(f"[export-pymol] renderer: {renderer} (requested {args.render}); wrote "
+                  f"{', '.join(p.name for p in panels[variant].values())} and {combined[variant]}")
     else:
         print("[export-pymol] renderer: none (no PNG written)")
     info = {
@@ -603,12 +711,21 @@ def main(argv=None) -> int:
         "renderer": renderer,
         "dpi": args.dpi,
         "tilt_deg": args.tilt_deg,
-        "panels": {site: path.name for site, path in panels.items()},
-        "combined": combined.name if combined else None,
+        "panels": {site: path.name for site, path in panels["co"].items()},
+        "combined": combined["co"].name if combined["co"] else None,
+        "panels_contact": {site: path.name for site, path in panels["contact"].items()},
+        "combined_contact": combined["contact"].name if combined["contact"] else None,
+        "contacts": {
+            entry["site"]: {"pair": entry["contact"]["pair"], "distance_ang": round(entry["contact"]["distance"], 4),
+                            "co2_atom_id": entry["contact"]["co2_index"] + 1,
+                            "slab_atom_id": entry["contact"]["slab_index"] + 1}
+            for entry in entries
+        },
     }
     (output_dir / RENDER_INFO_NAME).write_text(json.dumps(info, indent=2) + "\n", encoding="utf-8")
     readme = output_dir / README_NAME
-    readme.write_text(README_TEXT.format(pml=PML_NAME, combined=COMBINED_NAME, info=RENDER_INFO_NAME),
+    readme.write_text(README_TEXT.format(pml=PML_NAME, combined=COMBINED_NAME, contact=CONTACT_COMBINED_NAME,
+                                         info=RENDER_INFO_NAME),
                       encoding="utf-8")
     print(f"[export-pymol] wrote {readme}")
     return 0

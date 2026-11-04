@@ -71,6 +71,8 @@ def test_files_written_for_ok_sites(run, tmp_path):
     info = json.loads((out / "render_info.json").read_text())
     assert info["renderer"] == "none" and info["requested"] == "none"
     assert info["panels"] == {} and info["combined"] is None
+    assert info["panels_contact"] == {} and info["combined_contact"] is None
+    assert set(info["contacts"]) == {"top_metal", "bridge"}
     pdb = (out / "bridge.pdb").read_text()
     assert "CRYST1" in pdb and " CO2 " in pdb and " SLB " in pdb
     atoms = read(out / "bridge.pdb", format="proteindatabank")
@@ -103,6 +105,9 @@ def test_pml_references_files_and_threshold(run, tmp_path):
     assert pml.count("rotate x, -70.0,") == 2  # same orientation for every site
     for site in ("top_metal", "bridge"):
         assert f"# png fig01_{site}.png, dpi=600" in pml and "# ray 1600, 1600" in pml
+        assert f"# png fig01_{site}_contact.png, dpi=600" in pml
+        assert f"distance {site}_dist_contact, {site} and id " in pml
+        assert f"set dash_gap, 0.15, {site}_dist_contact" in pml
     assert not re.search(r"^(ray|png)\b", pml, flags=re.M)  # ray/png lines stay commented
 
 
@@ -138,14 +143,19 @@ def test_ase_renderer_writes_panels_and_combined_figure(run, tmp_path, monkeypat
     assert _export(run, out, "--dpi", "100") == 0  # auto -> ase without PyMOL
     assert "renderer: ase (requested auto)" in capsys.readouterr().out
     info = json.loads((out / "render_info.json").read_text())
+    contacts = info.pop("contacts")
     assert info == {
         "requested": "auto", "renderer": "ase", "dpi": 100, "tilt_deg": 20.0,
         "panels": {"top_metal": "fig01_top_metal.png", "bridge": "fig01_bridge.png"},
         "combined": "fig01_adsorption_structures.png",
+        "panels_contact": {"top_metal": "fig01_top_metal_contact.png", "bridge": "fig01_bridge_contact.png"},
+        "combined_contact": "fig01_adsorption_structures_contact.png",
     }
+    assert set(contacts) == {"top_metal", "bridge"}
     from matplotlib.image import imread
 
-    for name in ("fig01_top_metal.png", "fig01_bridge.png", "fig01_adsorption_structures.png"):
+    for name in ("fig01_top_metal.png", "fig01_bridge.png", "fig01_adsorption_structures.png",
+                 "fig01_top_metal_contact.png", "fig01_adsorption_structures_contact.png"):
         image = imread(out / name)
         assert image[..., :3].min() < 0.5  # something drawn
         assert image[0, 0, :3] == pytest.approx([1.0, 1.0, 1.0])  # white background
@@ -155,6 +165,33 @@ def test_ase_renderer_writes_panels_and_combined_figure(run, tmp_path, monkeypat
     panel_w, panel_h = _png_size(out / "fig01_bridge.png")
     assert width == 700  # 7 in at 100 dpi; two panels of 3.5 in + 0.6 in for labels and legend
     assert height == pytest.approx(panel_h * 350 / panel_w + 60, abs=2)
+    assert _png_size(out / "fig01_adsorption_structures_contact.png") == (width, height)
+    # The two variants differ only in the annotation.
+    assert not np.array_equal(imread(out / "fig01_bridge.png"), imread(out / "fig01_bridge_contact.png"))
+
+
+def test_shortest_contact_uses_the_minimum_image():
+    atoms = _slab_with_co2((1.0, 0.3))
+    centred = export_pymol.centred(atoms)
+    positions = export_pymol.pdb_positions(centred)
+    contact = export_pymol.shortest_contact(centred, positions)
+    slab = len(atoms) - 3
+    from ase.geometry import get_distances
+
+    _, d = get_distances(centred.positions[slab:], centred.positions[:slab], cell=centred.cell, pbc=centred.pbc)
+    assert contact["distance"] == pytest.approx(d.min())
+    assert contact["co2_index"] >= slab and contact["slab_index"] < slab
+    assert np.linalg.norm(contact["endpoint"] - positions[contact["co2_index"]]) == pytest.approx(d.min())
+    assert contact["pair"] in {"O–Zn", "O–O", "C–Zn", "C–O"}
+    # Upright CO2 standing on one O over a surface O: the lower O makes the contact, not C.
+    upright = atoms.copy()
+    surface_o = upright.positions[12]  # exposed-layer O at z = 13.7
+    upright.positions[-3] = surface_o + [0.0, 0.0, 2.0]
+    upright.positions[-2] = surface_o + [0.0, 0.0, 3.16]
+    upright.positions[-1] = surface_o + [0.0, 0.0, 4.32]
+    contact = export_pymol.shortest_contact(upright, upright.get_positions())
+    assert (contact["co2_index"], contact["slab_index"], contact["pair"]) == (len(upright) - 3, 12, "O–O")
+    assert contact["distance"] == pytest.approx(2.0) and contact["in_cell"]
 
 
 def test_view_rotation_matches_pml():
@@ -233,7 +270,9 @@ def test_pymol_renderer_runs_the_pml_commands(run, tmp_path, monkeypatch, capsys
         assert state == {"launched": ["pymol", "-qc"]}
     info = json.loads((out / "render_info.json").read_text())
     assert info["renderer"] == "pymol" and info["combined"] == "fig01_adsorption_structures.png"
+    assert info["combined_contact"] == "fig01_adsorption_structures_contact.png"
     assert (out / "fig01_adsorption_structures.png").is_file()
+    assert (out / "fig01_adsorption_structures_contact.png").is_file()
 
     calls = cmd.calls
     assert calls[0] == ("reinitialize", (), {})
@@ -246,12 +285,23 @@ def test_pymol_renderer_runs_the_pml_commands(run, tmp_path, monkeypatch, capsys
     recorded = [export_pymol.pml_line(call) for call in calls[:len(scene)]]
     assert recorded == [line.replace("load top_metal.pdb", f"load {out / 'top_metal.pdb'}")
                         .replace("load bridge.pdb", f"load {out / 'bridge.pdb'}") for line in scene]
-    # Then one block per site: the commented render block of the .pml, executed.
+    # One PyMOL distance object per site for the contact (between the two atoms).
+    contact_calls = [c for c in calls if c[0] == "distance" and c[1][0].endswith("_dist_contact")]
+    assert [c[1][0] for c in contact_calls] == ["top_metal_dist_contact", "bridge_dist_contact"]
+    for call in contact_calls:
+        site = call[1][0].removesuffix("_dist_contact")
+        ids = info["contacts"][site]
+        assert call[1][1:] == (f"{site} and id {ids['co2_atom_id']}", f"{site} and id {ids['slab_atom_id']}")
+    # Then two blocks per site (C-O labels, contact): the commented render blocks of the .pml, executed.
     rest = calls[len(scene):]
-    assert [c[0] for c in rest] == ["disable", "enable", "enable", "reset", "zoom", "ray", "png"] * 2
+    assert [c[0] for c in rest] == ["disable", "enable", "enable", "reset", "zoom", "ray", "png"] * 4
     assert rest[1] == ("enable", ("top_metal",), {}) and rest[4] == ("zoom", ("top_metal_shown", 1.5), {})
+    assert rest[2] == ("enable", ("top_metal_dist_co*",), {})
+    assert rest[9] == ("enable", ("top_metal_dist_contact",), {})
     assert rest[5] == ("ray", (1600, 1600), {})
     assert rest[6] == ("png", (str(out / "fig01_top_metal.png"),), {"dpi": 300})
-    assert rest[13] == ("png", (str(out / "fig01_bridge.png"),), {"dpi": 300})
-    for call in rest[:7]:
+    assert rest[13] == ("png", (str(out / "fig01_top_metal_contact.png"),), {"dpi": 300})
+    assert rest[20] == ("png", (str(out / "fig01_bridge.png"),), {"dpi": 300})
+    assert rest[27] == ("png", (str(out / "fig01_bridge_contact.png"),), {"dpi": 300})
+    for call in rest[:14]:
         assert f"# {export_pymol.pml_line(call)}".replace(str(out) + "/", "") in pml

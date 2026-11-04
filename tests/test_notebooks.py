@@ -145,5 +145,94 @@ class AnalysisNotebookDryRunTest(unittest.TestCase):
         self.assertEqual(sorted(analyses.iterdir()) if analyses.is_dir() else [], before)
 
 
+class AnalysisNotebookWorkflowTest(unittest.TestCase):
+    """The analysis cells run the launcher's command, and only md_frame_analysis.csv lands in RUN."""
+
+    def notebook_commands(self) -> tuple[list[list[str]], dict]:
+        """Every command the cells would run with all RUN_* flags True (nothing executed)."""
+        sources = code_sources(load(NOTEBOOKS["analysis"]))
+        namespace: dict = {}
+        commands: list[list[str]] = []
+        previous = Path.cwd()
+        try:
+            os.chdir(ROOT)
+            with mock.patch("builtins.print"):
+                for index, source in enumerate(sources):
+                    if index > 1:  # after the helpers and the configuration cell
+                        namespace["run_cmd"] = lambda args, env=None: commands.append(list(args))
+                    if index == 1:
+                        source = FLAG.sub(lambda m: f"{m.group(1)} = True", source)
+                    exec(compile(source, "<notebook>", "exec"), namespace)
+        finally:
+            os.chdir(previous)
+        return commands, namespace
+
+    def test_cells_call_run_analysis_like_the_launcher(self):
+        commands, namespace = self.notebook_commands()
+        run_dir = str(namespace["RUN_DIR"])
+        config = str(ROOT / "configs" / "analysis" / "zno_current.yaml")
+        self.assertEqual(commands[0][:3], [sys.executable, "-m", "scripts.workflows.run_status"])
+        analyses = commands[1:]
+        self.assertEqual([command[3] for command in analyses], ["co2_reduction", "neb", "md_trajectory", "paper"])
+        ids = set()
+        for command in analyses:
+            with self.subTest(method=command[3]):
+                self.assertEqual(command[:3], [sys.executable, "-m", "scripts.workflows.run_analysis"])
+                self.assertEqual(command[4:9], ["--config", config, "--scientific-results", run_dir, "--run-id"])
+                self.assertEqual(len(command), 10)
+                ids.add(command[9])
+        self.assertEqual(len(ids), len(analyses), "each section needs its own analysis run ID")
+        code = "\n".join(code_sources(load(NOTEBOOKS["analysis"])))
+        for stale in ("render_publication_figures", "science_figures", "zno_paper.yaml",
+                      "scripts.analysis.", "scripts.visualization."):
+            self.assertNotIn(stale, code)
+
+    def test_notebook_commands_leave_the_simulation_run_unchanged(self):
+        """Run the notebook argv through run_analysis.main (fake producers) on a fake run."""
+        import tempfile
+
+        import importlib.util
+
+        from scripts.workflows import run_analysis
+
+        # The fake producers of the run_analysis tests (loaded by path: tests/ is not a package).
+        spec = importlib.util.spec_from_file_location(
+            "run_analysis_paper_tests", Path(__file__).resolve().parent / "test_run_analysis_paper.py")
+        helpers = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(helpers)
+        fake_run_command, touch = helpers.fake_run_command, helpers.touch
+
+        commands, _namespace = self.notebook_commands()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run = root / "results" / "simulations" / "fake_run"
+            for name in ("dft_summary.csv", "tddft_summary.csv", "co2rr_pathway_summary.csv", "config.yaml",
+                         "run_manifest.json"):
+                touch(run / name)
+            touch(run / "pathways/ZnO/top_metal/che/cooh/energy.json", "{}\n")
+            touch(run / "tddft/ZnO/top_metal/transitions.csv")
+            touch(run / "neb/ZnO/top_metal_to_bridge/neb_run_summary.json", "{}\n")
+            touch(run / "md/ZnO/top_metal/seed_1/md_production.traj")
+            for site in ("top_metal", "top_oxygen", "bridge"):
+                touch(run / f"dft/ZnO/{site}/ZnO_{site}_optimized.xyz")
+            touch(run / "data/geometries/ZnO/metadata.json", "{}\n")
+            touch(run / "data/geometries/ZnO/clean_slab.traj")
+            before = {path: path.read_bytes() for path in run.rglob("*") if path.is_file()}
+            with mock.patch.object(run_analysis, "PROJECT_ROOT", root), \
+                    mock.patch.object(run_analysis, "run_command", fake_run_command), \
+                    mock.patch.object(run_analysis, "active_environment", lambda default: "test-env"), \
+                    mock.patch("builtins.print"):
+                for command in commands[1:]:
+                    argv = [*command[3:]]
+                    argv[argv.index("--scientific-results") + 1] = str(run)
+                    run_analysis.main(argv)
+            after = {path: path.read_bytes() for path in run.rglob("*") if path.is_file()}
+            added = sorted(str(path.relative_to(run)) for path in set(after) - set(before))
+            self.assertEqual(added, ["md/ZnO/top_metal/md_frame_analysis.csv"])
+            self.assertEqual({path: after[path] for path in before}, before)
+            analyses = sorted(path.name for path in (root / "results" / "analyses").iterdir())
+            self.assertEqual(analyses, sorted(command[9] for command in commands[1:]))
+
+
 if __name__ == "__main__":
     unittest.main()

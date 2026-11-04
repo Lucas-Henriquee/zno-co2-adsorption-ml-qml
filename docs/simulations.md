@@ -49,15 +49,17 @@ Prerequisites are added automatically: `geometry` -> `dft` -> {`tddft`, `co2rr`,
   whose hash differs from the recorded one is refused, so an edited reference YAML
   cannot continue an old run.
 - Resume also refuses a different environment name, package versions, materials,
-  sites, MPI process count or `OMP_NUM_THREADS`. The launcher, `python -m` inside the
-  same environment and the notebook record the same environment name (a prefix path
-  by its last component). A run started with plain `python -m` (no launcher) by an
-  older version of the workflow recorded `qml-zno-simulation`; resume it with
-  `QML_ZNO_ACTIVE_ENVIRONMENT=qml-zno-simulation` in that same environment.
-- `run_simulations` writes only the method outputs. The CO₂RR corrections
-  (`co2rr_corrections`), the MD trajectory analysis and the NEB tables are analysis
-  steps ([figures](figures.md)); `run_analysis.sh science` does not run the CO₂RR
-  corrections yet, so run `co2rr_corrections` before it to get variant c.
+  sites, MPI process count or `OMP_NUM_THREADS`. The launcher, `python -m` and the
+  notebook record the same environment name (a prefix path by its last component).
+  If the recorded name differs (`environment` in `run_manifest.json`) but it is the
+  same environment, set `QML_ZNO_ACTIVE_ENVIRONMENT=<recorded name>`.
+- `run_simulations` writes only the method outputs. The CO₂RR corrections, NEB tables
+  and MD trajectory analysis are analysis methods (`run_analysis.sh science` or
+  `paper`, [analysis](analysis.md)).
+- One invocation per run: `run_simulations` holds an exclusive lock on
+  `<run>/.run_simulations.lock` until it exits. A second invocation on the same run
+  (for example a `--resume --retry-failed` while the first is alive) stops with
+  "another run_simulations is using this run". `run_md` started by hand is not locked.
 - Completed methods are skipped. A method with status `failed` or `running`
   (interrupted) stops the run unless `--retry-failed` is given; otherwise use a new
   run ID.
@@ -100,11 +102,27 @@ CO₂RR, MD and NEB scripts equal the YAML (checked by tests), except that a sta
 - NEB: the second phase climbs only when an internal image is above both endpoints;
   otherwise the plain NEB continues. Barriers <= 0.03 eV (`barrier_resolution_ev`)
   are reported as not resolved. With 6 processes each image gets 2 ranks.
-- CO₂RR free energies are stored as computed (variant a).
-  `python -m scripts.analysis.co2rr_corrections --results-dir results/simulations/<run-id>`
-  writes `co2rr_corrected_summary.csv` with variants b (quasi-harmonic floor) and
-  c (b + PBE gas corrections CO₂ +0.19 eV, CO -0.24 eV); the analyses use variant c
-  when that file exists.
+- CO₂RR free energies are stored as computed (variant a). The analysis method
+  `co2rr_corrections` adds variants b (quasi-harmonic floor) and c (b + PBE gas
+  corrections CO₂ +0.19 eV, CO -0.24 eV) in the analysis run; every analysis uses the
+  configured variant (`methods.co2rr_corrections.variant`, c).
 
 A finished process does not prove optimizer or SCF convergence; check the method logs
 before using the outputs.
+
+## Optional: relax a NEB image
+
+When a NEB band has an internal image below both endpoints (`endpoint_not_minimum`),
+relax that image as a free structure with the run's DFT settings:
+
+```bash
+mpiexec -n 6 gpaw python -m scripts.simulations.neb.relax_neb_image \
+  --results-dir results/simulations/<run-id> --pair top_metal_to_bridge --image 3 \
+  --fmax 0.02 --steps 300
+```
+
+It reads `neb/<material>/<pair>/neb_final_images.traj` and writes
+`neb/<material>/<pair>/image<N>_relaxed/` (structure, trajectory, log and a JSON with
+energy, fmax, steps, convergence, energy relative to each endpoint and the implied
+E_ads). An existing folder is kept unless `--overwrite` is given. It is not a
+`run_simulations` method and is not recorded in `run_manifest.json`.

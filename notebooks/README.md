@@ -2,13 +2,14 @@
 
 Secondary route to the Python workflow. Each cell calls the same modules with
 `sys.executable`, so a notebook and the command line produce the same files. Numerical
-settings come from `configs/simulations/zno_production.yaml` (copied into each run as
-`config.yaml`), not from the notebooks.
+settings come from the YAML files, not from the notebooks:
+`configs/simulations/zno_production.yaml` (copied into each run as `config.yaml`) and
+`configs/analysis/zno_current.yaml`.
 
 | Notebook | Runs | Configuration cell |
 | --- | --- | --- |
 | `zno-co2-lucas.ipynb` | Simulations through `scripts.workflows.run_simulations` (geometry, DFT, CO₂RR, TDDFT, MD, NEB) and a summary of the raw outputs; it runs exactly what `./run_simulations.sh` runs | `RUN_ID`, sites, `MPI_PROCESSES` (6), `RETRY_FAILED`, `RUN_*` flags |
-| `zno-co2-analysis.ipynb` | Analyses of a finished or running simulation run: status dashboard, CO₂RR corrections, pathway plot and CO₂ reduction tables, NEB tables and plots, MD trajectory analysis, publication figures, paper figures and tables (`run_analysis paper`) | `RUN_ID`, `OUTPUT_ID`, CO₂RR variant (c), NEB resolution (default: the run's `config.yaml`), figure DPI, `RUN_*` flags |
+| `zno-co2-analysis.ipynb` | Analyses of a finished or running simulation run: status dashboard, then `run_analysis` for `co2_reduction` (with the CO₂RR corrections), `neb`, `md_trajectory` and `paper`, exactly as `./run_analysis.sh` | `RUN_ID`, `OUTPUT_ID`, `ANALYSIS_CONFIG` (`configs/analysis/zno_current.yaml`), `RUN_*` flags |
 
 - Every `RUN_*` flag is `False` in the saved notebooks: nothing runs until one is set.
 - Start them from `notebooks/` or the repository root.
@@ -17,19 +18,12 @@ settings come from `configs/simulations/zno_production.yaml` (copied into each r
   adds `--retry-failed`. Resume rules: [docs/simulations.md](../docs/simulations.md).
   The environment recorded in the run is `QML_ZNO_SIM_ENV` if set, else the kernel's
   environment; a prefix path is recorded by its last component, as by the launchers.
-- Analysis notebook writes to `results/analyses/<OUTPUT_ID>/` (`co2rr/`,
-  `science/co2_reduction/`, `science/figures/`). The CO₂RR correction, NEB and MD
-  modules get no output directory and write into the simulation run: `co2rr_corrected_summary.csv`,
-  `neb/<material>/comparison_plots/`, `md_trajectory_analysis_summary.csv`,
-  `md_desorption_sensitivity.csv`, `md/<material>/...`.
-- Analysis notebook, `RUN_PAPER`: runs `python -m scripts.workflows.run_analysis paper
-  --config configs/analysis/zno_paper.yaml --scientific-results <run> --run-id
-  <OUTPUT_ID>_paper` into `results/analyses/<OUTPUT_ID>_paper/` (settings from the YAML,
-  not from the notebook) and lists `paper/` (`fig01_adsorption_structures.png` rendered by
-  `export_pymol`: PyMOL when `import pymol` works, else the ASE/matplotlib fallback;
-  `pymol-open-source` from conda-forge is optional and only changes the renderer; the
-  PDB/CIF and `fig01_adsorption_structures.pml` for PyMOL are in `paper/fig01_pymol/`) and
-  `figure_registry.csv`.
+- Analysis notebook: each section runs `python -m scripts.workflows.run_analysis <method>
+  --config configs/analysis/zno_current.yaml --scientific-results <run> --run-id
+  <OUTPUT_ID>_<section>` into a new `results/analyses/<OUTPUT_ID>_<section>/` (settings
+  from the YAML, not from the notebook; an existing ID is refused, so change `OUTPUT_ID`
+  to rerun). The simulation run is read only, except `md_frame_analysis.csv` written by
+  the MD analysis. Paper items: [docs/figures.md](../docs/figures.md).
 
 ## Environment
 

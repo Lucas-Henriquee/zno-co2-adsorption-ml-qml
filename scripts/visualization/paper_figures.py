@@ -2,13 +2,21 @@
 
 Inputs (RUN = simulation run, A = analysis run):
 
-* fig03: ``RUN/dft_summary.csv`` (required for fig03): E_ads, C-surface distance
-  (``c_surface_distance_ang``, C height above the topmost slab atom) and the Gamma gap of
-  the clean and adsorbed slab; only rows with ``dft_status`` ok.
-* fig04: ``RUN/tddft_summary.csv`` and ``RUN/tddft/<MAT>/<site>/transitions.csv``.
-* fig05: ``A/science/co2rr/co2rr_corrected_summary.csv`` (one variant, default c).
+* fig03: ``RUN/dft_summary.csv`` (required for fig03): E_ads, "C height above the topmost
+  surface atom" (``c_surface_distance_ang``: z of C minus z of the highest slab atom; not the
+  shortest C-surface distance of Table 2) and the Gamma gap of the clean and adsorbed slab;
+  only rows with ``dft_status`` ok.
+* fig04: ``RUN/tddft_summary.csv`` and ``RUN/tddft/<MAT>/<site>/transitions.csv``: Gaussian
+  broadened spectra of the three sites on one common normalisation, x axis from 3 eV to the
+  last written transition + 4 sigma; the two main peaks (highest local maxima of the mean
+  curve; the sites coincide within ~0.02 eV) are labelled once for all sites.
+* fig05: ``A/science/co2rr/co2rr_corrected_summary.csv`` (one variant, default c); validity
+  from ``co2rr_corrections.row_validity``.
 * fig06: ``A/science/md/md_trajectory_analysis_summary.csv`` and
-  ``RUN/md/<MAT>/<site>/md_frame_analysis.csv`` (one seed per site).
+  ``RUN/md/<MAT>/<site>/md_frame_analysis.csv``: "Shortest CO2-surface distance"
+  (``c_o_min_slab_distance_ang``) of one seed (``--md-seed``) per site. The seed is not shown
+  in the figure (the caption states it); the temperature in the title comes from
+  ``RUN/config.yaml`` (methods.md.temperature_kelvin) when present.
 * fig07: ``A/science/neb/neb_image_energies.csv``: the NEB pairs are chained into one
   migration path top_metal -> bridge -> top_oxygen (energies relative to the first image of
   the chain); pairs that cannot be chained are drawn on the same axes, each relative to its
@@ -34,9 +42,9 @@ import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 
+from scripts.analysis.co2rr_corrections import row_validity  # noqa: E402
 from scripts.analysis.paper_tables import (  # noqa: E402
     SITE_DISPLAY,
-    co2rr_validity,
     dft_rows_for,
     is_finite,
     ordered_sites,
@@ -64,26 +72,25 @@ CO2RR_STATES = (
     ("CO(g)", "dG_CO_desorption_ev"),
 )
 STATE_LABELS = {"CO2(g)": "CO$_2$(g)", "COOH*": "COOH*", "CO*": "CO*", "CO(g)": "CO(g)"}
-DEFAULT_DESORPTION_THRESHOLD_ANG = 4.5  # md_trajectory_analysis.DEFAULT_DESORPTION_THRESHOLD_ANG
 DEFAULT_MD_SEED = "1234"
 TITLES = {
     "fig03": "DFT descriptors of CO$_2$ on {material}",
     "fig04": "TDDFT spectra of the isolated CO$_2$ (adsorbed geometries)",
     "fig05": "CO$_2$ → CO free-energy profile (U = 0 V vs RHE)",
-    "fig06": "AIMD: CO$_2$–surface distance (seed {seed})",
+    "fig06": "AIMD at {temperature}",
     "fig07": "NEB migration path",
 }
+FIG06_YLABEL = "Shortest CO$_2$–surface distance (Å)"
 # fig04: spectral window, wavelength ticks of the top axis and shaded regions.
 HC_EV_NM = 1239.841984
 FIG04_E_MIN_EV = 3.0
-FIG04_E_MAX_MIN_EV = 13.0
-FIG04_WAVELENGTH_TICKS_NM = (400, 300, 200, 150, 120, 100)
+FIG04_N_PEAKS = 2
+FIG04_WAVELENGTH_TICKS_NM = (400, 300, 200, 150, 120, 100, 80, 60)
 FIG04_REGIONS = (
     # (label, lower eV, upper eV or None = window end, colour)
     ("UV (400–200 nm)", HC_EV_NM / 400.0, HC_EV_NM / 200.0, "#ede7f6"),
     ("Vacuum UV (< 200 nm)", HC_EV_NM / 200.0, None, "#eceff1"),
 )
-FIG04_LABEL_X_EV = 7.0
 # fig05 legend text of a site that has no U_L.
 CO2RR_INVALID_TEXT = {
     "unbound": "intermediates desorbed",
@@ -155,11 +162,13 @@ def annotate_bars(ax, bars, values, fmt: str) -> None:
 
 # ---------------------------------------------------------------- fig03
 FIG03_PANELS = (
-    ("adsorption_energy", ("adsorption_energy_ev",), "eV", "Adsorption energy (eV)", "(a) Adsorption energy"),
-    ("c_surface_distance", ("c_surface_distance_ang",), "Angstrom", "C–surface distance (Å)",
-     "(b) C–surface distance"),
+    # (panel, columns, unit, y label, title, name written to the data CSV)
+    ("adsorption_energy", ("adsorption_energy_ev",), "eV", "Adsorption energy (eV)", "(a) Adsorption energy",
+     "Adsorption energy"),
+    ("c_height_above_top_atom", ("c_surface_distance_ang",), "Angstrom", "Height (Å)",
+     "(b) C height above the\ntopmost surface atom", "C height above the topmost surface atom"),
     ("band_gap", ("clean_band_gap_gamma_ev", "adsorbed_band_gap_gamma_ev"), "eV", "Band gap at Γ (eV)",
-     "(c) Band gap"),
+     "(c) Band gap", "Band gap at Gamma"),
 )
 
 
@@ -169,13 +178,14 @@ def fig03_data(results_dir: Path, material: str) -> pd.DataFrame:
     if not sites:
         raise SystemExit(f"[paper-figures] no {material} site with dft_status ok for fig03")
     records = []
-    for panel, keys, unit, _ylabel, _title in FIG03_PANELS:
+    for panel, keys, unit, _ylabel, _title, label in FIG03_PANELS:
         values = [(site, key, safe_float(dft[site].get(key))) for key in keys for site in sites]
         if not any(is_finite(value) for _, _, value in values):
             skip(f"fig03 panel {panel}: no {'/'.join(keys)} values")
             continue
         for site, key, value in values:
-            records.append({"panel": panel, "site": site, "quantity": key, "value": value, "unit": unit})
+            records.append({"panel": panel, "label": label, "site": site, "quantity": key, "value": value,
+                            "unit": unit})
     return pd.DataFrame(records)
 
 
@@ -185,14 +195,14 @@ def plot_fig03(data: pd.DataFrame, material: str):
     x = np.arange(len(sites))
     fig, axes = plt.subplots(1, len(panels), figsize=(2.35 * len(panels), 2.6), constrained_layout=True)
     axes = np.atleast_1d(axes)
-    for ax, (panel, keys, _unit, ylabel, title) in zip(axes, panels):
+    for ax, (panel, keys, _unit, ylabel, title, _label) in zip(axes, panels):
         part = data[data["panel"] == panel]
         if panel == "band_gap":
             width = 0.38
             for offset, key in zip((-width / 2, width / 2), keys):
                 values = part[part["quantity"] == key].set_index("site").reindex(sites)["value"].to_numpy()
                 ax.bar(x + offset, values, width, color=GAP_COLORS[key], label=GAP_LABELS[key])
-            ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.18), ncol=2, fontsize=7.0,
+            ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.30), ncol=2, fontsize=7.0,
                       handlelength=1.2, columnspacing=0.8)
         else:
             values = part.set_index("site").reindex(sites)["value"].to_numpy()
@@ -223,15 +233,26 @@ def gaussian_broaden(grid: np.ndarray, energies: np.ndarray, osc: np.ndarray, si
     return (np.exp(-0.5 * delta**2) / (sigma * math.sqrt(2.0 * math.pi))) @ osc
 
 
-def curve_label(site: str) -> str:
-    """Site name of the fig04 curves and peak labels (draft style: top-metal)."""
-    return site.replace("_", "-")
-
-
 def fig04_window(spectra: dict[str, pd.DataFrame], sigma: float) -> tuple[float, float]:
-    """3 eV to max(13 eV, last written transition + 4 sigma)."""
+    """3 eV to the last written transition + 4 sigma (no empty region beyond the transitions)."""
     last = max(float(t["energy_ev"].max()) for t in spectra.values())
-    return FIG04_E_MIN_EV, max(FIG04_E_MAX_MIN_EV, last + 4.0 * sigma)
+    return FIG04_E_MIN_EV, max(FIG04_E_MIN_EV + 1.0, last + 4.0 * sigma)
+
+
+def local_maxima(curve: np.ndarray) -> np.ndarray:
+    """Indices of the strict interior local maxima of a sampled curve."""
+    curve = np.asarray(curve, dtype=float)
+    if curve.size < 3:
+        return np.array([], dtype=int)
+    inner = (curve[1:-1] > curve[:-2]) & (curve[1:-1] >= curve[2:])
+    return np.flatnonzero(inner) + 1
+
+
+def main_peaks(grid: np.ndarray, curve: np.ndarray, n: int = FIG04_N_PEAKS) -> list[int]:
+    """Grid indices of the n highest local maxima of a curve, in energy order."""
+    maxima = local_maxima(curve)
+    highest = maxima[np.argsort(curve[maxima])[::-1][:n]]
+    return sorted(int(i) for i in highest)
 
 
 def fig04_data(results_dir: Path, material: str, sigma: float) -> pd.DataFrame | None:
@@ -256,10 +277,8 @@ def fig04_data(results_dir: Path, material: str, sigma: float) -> pd.DataFrame |
         skip(f"fig04: no {material} site with tddft_status ok and transitions.csv")
         return None
 
-    # transitions.csv holds only the lowest transitions (run_tddft --max-transitions): a
-    # curve is truncated above its last written transition (stated in the caption).
     e_min, e_max = fig04_window(spectra, sigma)
-    grid = np.linspace(e_min, e_max, 1200)
+    grid = np.linspace(e_min, e_max, max(1200, int(round((e_max - e_min) / (sigma / 25.0)))))
     curves = {
         site: gaussian_broaden(grid, table["energy_ev"].to_numpy(dtype=float),
                                table["oscillator_strength"].to_numpy(dtype=float), sigma)
@@ -270,14 +289,33 @@ def fig04_data(results_dir: Path, material: str, sigma: float) -> pd.DataFrame |
     if not scale > 0.0:
         skip("fig04: every oscillator strength is zero in the plotted window")
         return None
+    # The main peaks are taken once from the mean curve; each site's nearest local maximum
+    # is recorded to show how far the sites differ.
+    mean_curve = np.mean([curve for curve in curves.values()], axis=0)
+    shared = main_peaks(grid, mean_curve)
+    site_peaks = {}
+    for site, curve in curves.items():
+        maxima = local_maxima(curve)
+        site_peaks[site] = [float(grid[maxima[np.argmin(np.abs(maxima - index))]]) if maxima.size
+                            else float("nan") for index in shared]
+    spread = max((abs(peaks[k] - float(grid[index])) for peaks in site_peaks.values()
+                  for k, index in enumerate(shared)), default=0.0)
+    if spread > 0.05:
+        print(f"[paper-figures] fig04: site peaks differ by up to {spread:.3f} eV from the shared labels")
+    peak_columns = {}
+    for k in range(FIG04_N_PEAKS):
+        found = k < len(shared)
+        peak_columns[f"main_peak_{k + 1}_energy_ev"] = float(grid[shared[k]]) if found else float("nan")
+        peak_columns[f"main_peak_{k + 1}_absorption_au"] = (
+            float(mean_curve[shared[k]] / scale) if found else float("nan"))
     records = []
     for site, curve in curves.items():
-        peak = int(np.argmax(curve))
-        label = f"{material} | {curve_label(site)}"
+        site_columns = {f"site_peak_{k + 1}_energy_ev": site_peaks[site][k] if k < len(shared) else float("nan")
+                        for k in range(FIG04_N_PEAKS)}
         for energy, value in zip(grid, curve):
-            records.append({"site": site, "curve": label, "energy_ev": energy, "intensity_per_ev": value,
-                            "absorption_au": value / scale, "sigma_ev": sigma,
-                            "peak_energy_ev": float(grid[peak]), "peak_absorption_au": float(curve[peak] / scale)})
+            records.append({"site": site, "curve": site_label(site).lower(), "energy_ev": energy,
+                            "intensity_per_ev": value, "absorption_au": value / scale, "sigma_ev": sigma,
+                            **peak_columns, **site_columns})
     return pd.DataFrame(records)
 
 
@@ -292,27 +330,31 @@ def plot_fig04(data: pd.DataFrame):
     e_min, e_max = float(data["energy_ev"].min()), float(data["energy_ev"].max())
     for label, lower, upper, color in FIG04_REGIONS:
         upper = e_max if upper is None else min(upper, e_max)
+        if upper <= lower:
+            continue
         ax.axvspan(lower, upper, color=color, alpha=0.6, linewidth=0, zorder=0)
         for edge in (lower, upper):
             if e_min < edge < e_max:
                 ax.axvline(edge, color="#555555", linewidth=0.7, linestyle="--", zorder=1)
-        ax.text(0.5 * (lower + upper), 0.97, label, transform=ax.get_xaxis_transform(),
+        ax.text(0.5 * (lower + upper), 0.98, label, transform=ax.get_xaxis_transform(),
                 ha="center", va="top", fontsize=7.5, color="#444444")
 
-    sites = list(dict.fromkeys(data["site"]))
-    label_y = np.linspace(0.80, 0.80 - 0.17 * (len(sites) - 1), len(sites))
-    for i, site in enumerate(sites):
+    for i, site in enumerate(dict.fromkeys(data["site"])):
         part = data[data["site"] == site]
-        color = site_color(site, i)
-        ax.plot(part["energy_ev"], part["absorption_au"], color=color, label=str(part["curve"].iloc[0]), zorder=3)
-        peak_e, peak_y = float(part["peak_energy_ev"].iloc[0]), float(part["peak_absorption_au"].iloc[0])
-        ax.annotate(f"{curve_label(site)}\n{peak_e:.2f} eV", xy=(peak_e, peak_y),
-                    xytext=(FIG04_LABEL_X_EV, label_y[i]), textcoords="data", ha="left", va="center",
-                    fontsize=7.0, color=color, zorder=4,
-                    arrowprops={"arrowstyle": "-", "color": color, "linewidth": 0.6, "shrinkA": 2, "shrinkB": 1,
-                                "relpos": (1.0, 0.5)})
+        ax.plot(part["energy_ev"], part["absorption_au"], color=site_color(site, i),
+                label=str(part["curve"].iloc[0]), zorder=3)
+    # The main peaks: one label each, shared by every site.
+    first = data.iloc[0]
+    for k in range(FIG04_N_PEAKS):
+        energy = float(first[f"main_peak_{k + 1}_energy_ev"])
+        height = float(data.loc[np.isclose(data["energy_ev"], energy), "absorption_au"].max()) \
+            if is_finite(energy) else float("nan")
+        if not (is_finite(energy) and is_finite(height)):
+            continue
+        ax.annotate(f"{energy:.2f} eV", xy=(energy, height), xytext=(0, 4), textcoords="offset points",
+                    ha="center", va="bottom", fontsize=7.0, color="#222222", zorder=4)
     ax.set_xlim(e_min, e_max)
-    ax.set_ylim(0.0, 1.12)
+    ax.set_ylim(0.0, 1.25)  # room for the peak labels below the region labels
     ax.set_xlabel("Energy (eV)")
     ax.set_ylabel("Normalized absorption (a.u.)")
     top = ax.secondary_xaxis("top", functions=(energy_to_nm, energy_to_nm))
@@ -350,7 +392,7 @@ def fig05_data(analysis_dir: Path, material: str, variant: str) -> pd.DataFrame 
     records = []
     for site in ordered_sites(rows):
         row = rows[site]
-        validity = co2rr_validity(row)
+        validity = row_validity(row)
         u_l = safe_float(row.get("limiting_potential_v")) if validity == "ok" else float("nan")
         total = 0.0
         for index, (state, key) in enumerate(CO2RR_STATES):
@@ -411,24 +453,38 @@ def fig06_data(results_dir: Path, analysis_dir: Path, material: str, seed: str) 
         for _, frame in traj.iterrows():
             records.append({"site": site, "seed": chosen, "time_fs": float(frame["time_fs"]),
                             "time_ps": (float(frame["time_fs"]) - start) / 1000.0,
-                            "co2_surface_distance_ang": float(frame["c_o_min_slab_distance_ang"])})
+                            "shortest_co2_surface_distance_ang": float(frame["c_o_min_slab_distance_ang"])})
     if not records:
         skip("fig06: no frame data for any site")
         return None
     return pd.DataFrame(records)
 
 
-def plot_fig06(data: pd.DataFrame, seed: str):
+def md_temperature_text(results_dir: Path) -> str:
+    """'300 K' from RUN/config.yaml (methods.md.temperature_kelvin), '' when unknown."""
+    path = results_dir / "config.yaml"
+    if not path.is_file():
+        return ""
+    try:
+        import yaml
+
+        config = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        value = float(((config.get("methods") or {}).get("md") or {}).get("temperature_kelvin"))
+    except Exception:  # no yaml, unreadable file or no temperature
+        return ""
+    return f"{value:.0f} K" if math.isfinite(value) else ""
+
+
+def plot_fig06(data: pd.DataFrame, temperature: str = ""):
+    """One trajectory per site; the seed is not shown (the caption states it)."""
     fig, ax = plt.subplots(figsize=(3.6, 2.6), constrained_layout=True)
     for i, site in enumerate(dict.fromkeys(data["site"])):
         part = data[data["site"] == site]
-        used = str(part["seed"].iloc[0])
-        label = site_label(site) + ("" if used == seed else f" (seed {used})")
-        ax.plot(part["time_ps"], part["co2_surface_distance_ang"], color=site_color(site, i),
-                linewidth=1.1, label=label)
+        ax.plot(part["time_ps"], part["shortest_co2_surface_distance_ang"], color=site_color(site, i),
+                linewidth=1.1, label=site_label(site))
     ax.set_xlabel("Production time (ps)")
-    ax.set_ylabel("CO$_2$–surface distance (Å)")
-    ax.set_title(TITLES["fig06"].format(seed=seed))
+    ax.set_ylabel(FIG06_YLABEL)
+    ax.set_title(TITLES["fig06"].format(temperature=temperature) if temperature else "AIMD")
     ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.22), ncol=3, handlelength=1.5, columnspacing=1.0)
     return fig
 
@@ -533,7 +589,17 @@ def fig07_frame(table: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(neb_chain_records(pairs, links))
 
 
-def plot_fig07(data: pd.DataFrame):
+def dimer_label(material: str) -> str:
+    """'Zn–O' for ZnO: metal symbol of the material (project_config), else the material name."""
+    try:
+        from scripts.common import project_config
+
+        return f"{project_config.MATERIALS[material].metal_symbol}–O"
+    except (ImportError, KeyError, AttributeError):
+        return material
+
+
+def plot_fig07(data: pd.DataFrame, material: str = "ZnO"):
     fig, ax = plt.subplots(figsize=(4.6, 2.9), constrained_layout=True)
     chained = (data["mode"] == "chain").all()
     for i, segment in enumerate(dict.fromkeys(data["segment"])):
@@ -552,7 +618,7 @@ def plot_fig07(data: pd.DataFrame):
                       else f"Energy relative to {str(data['endpoint_site'].iloc[0]).replace('_', ' ')} (eV)")
     else:
         ax.set_ylabel("Energy relative to the initial image (eV)")
-    ax.set_xlabel("Migration path along the Zn–O dimer (NEB images)")
+    ax.set_xlabel(f"Migration path along the {dimer_label(material)} dimer (NEB images)")
     ax.set_title(TITLES["fig07"], pad=14 if chained else 6)
     ax.legend(loc="best")
     return fig
@@ -568,11 +634,9 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument("--dpi", type=int, default=600)
     parser.add_argument("--tddft-sigma-ev", type=float, default=0.10,
                         help="Gaussian broadening sigma (eV) of fig04.")
-    parser.add_argument("--desorption-threshold", type=float, default=DEFAULT_DESORPTION_THRESHOLD_ANG,
-                        help="Desorption threshold of the MD analysis (A); not drawn, kept for the command line "
-                             "shared with md_trajectory_analysis.")
     parser.add_argument("--md-seed", default=DEFAULT_MD_SEED,
-                        help="MD seed drawn in fig06 (a site without it uses its first available seed).")
+                        help="MD seed drawn in fig06 (a site without it uses its first available seed); "
+                             "not shown in the figure.")
     parser.add_argument("--co2rr-variant", default="c", choices=("a", "b", "c"),
                         help="Variant of co2rr_corrected_summary.csv drawn in fig05.")
     parser.add_argument("--figures", nargs="+", choices=FIGURES, default=list(FIGURES))
@@ -598,8 +662,8 @@ def main(argv=None) -> int:
         "fig04": (lambda: fig04_data(results_dir, args.material, args.tddft_sigma_ev), plot_fig04),
         "fig05": (lambda: fig05_data(analysis_dir, args.material, args.co2rr_variant), plot_fig05),
         "fig06": (lambda: fig06_data(results_dir, analysis_dir, args.material, seed),
-                  lambda d: plot_fig06(d, seed)),
-        "fig07": (lambda: fig07_data(analysis_dir), plot_fig07),
+                  lambda d: plot_fig06(d, md_temperature_text(results_dir))),
+        "fig07": (lambda: fig07_data(analysis_dir), lambda d: plot_fig07(d, args.material)),
     }
     written = 0
     for figure in FIGURES:

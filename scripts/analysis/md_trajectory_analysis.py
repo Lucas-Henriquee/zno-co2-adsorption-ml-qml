@@ -18,7 +18,9 @@ Inputs (below --results-dir, one simulation run):
   the same file (then ``methods.md.sites`` / ``methods.dft.sites``), else
   project_config.ADSORPTION_SITES; a configured site or seed without a
   directory is listed in the summary as ``missing``, and a seed directory whose
-  ``md_equilibration.traj`` is still empty (0 bytes) as ``not_started``.
+  ``md_equilibration.traj`` is still empty (0 bytes) as ``not_started``. A
+  trajectory file that has bytes but cannot be opened (for example a file
+  written by two processes at once) makes the seed ``unreadable``.
 
 Per frame, with the minimum-image convention in the surface plane:
 
@@ -74,7 +76,14 @@ results/analyses/<id>/science/md of an analysis run):
 * ``OUT/md_trajectory_analysis_summary.csv`` (run level): one row per trajectory
   (configured sites/seeds without data included as ``missing`` / ``not_started``).
   ``fraction_production_other`` is the fraction of production frames whose
-  ``site_assignment`` is ``other``.
+  ``site_assignment`` is ``other``. ``fraction_production_at_start_site`` uses
+  ``nearest_site`` (no radius, desorbed frames included);
+  ``fraction_production_adsorbed_at_start_site`` counts the production frames
+  with ``site_assignment`` equal to the start site and ``desorbed_persistent``
+  0 (the value of Table 2). ``status``: ``complete`` (exactly the expected
+  production frames), ``partial`` (fewer), ``overfull`` (more: e.g. two writers
+  appended to the same file), ``no_production``, ``missing``, ``not_started``,
+  ``unreadable`` or ``error``.
 * ``OUT/md_desorption_sensitivity.csv`` (run level): for each trajectory and each
   ``--desorption-thresholds`` value (default 4.0 4.5 5.0 A), the fraction of
   production frames with ``c_o_min_slab_distance_ang`` above the threshold
@@ -83,8 +92,9 @@ results/analyses/<id>/science/md of an analysis run):
   first-principles justification (about twice the ~2.2 A start height, well
   beyond any C/O-surface contact); the table shows how much the conclusions
   depend on it.
-* ``OUT/md/<material>/md_nearest_site_occupancy.png`` (optional, not with ``--no-plot``): nearest site
-  against time, one panel per trajectory.
+* ``OUT/md_nearest_site_occupancy.png`` with ``--output-dir`` (without it
+  ``<results-dir>/md/<material>/md_nearest_site_occupancy.png``; not with ``--no-plot``):
+  nearest site against time, one panel per trajectory.
 """
 
 from __future__ import annotations
@@ -160,6 +170,7 @@ SUMMARY_COLUMNS = [
     "production_time_fs",
     "nearest_site_at_production_start",
     "fraction_production_at_start_site",
+    "fraction_production_adsorbed_at_start_site",
     "fraction_production_desorbed",
     "first_leave_start_site_fs",
     "first_desorbed_fs",
@@ -469,11 +480,16 @@ def load_reference_slab(material: str, path: Path | None):
 # ------------------------------------------------------------------ trajectories
 
 
+class UnreadableTrajectory(Exception):
+    """A trajectory file with content that ASE cannot open (e.g. two writers, corrupted header)."""
+
+
 def read_frames(path: Path) -> list:
-    """Every complete frame of an ASE trajectory; [] when it is missing or unreadable.
+    """Every complete frame of an ASE trajectory; [] when it is missing or empty.
 
     A trajectory still being written may end with an incomplete frame: reading
-    stops there, the frames before it are kept.
+    stops there, the frames before it are kept. A file with content that cannot
+    be opened at all raises UnreadableTrajectory.
     """
     if not path.is_file() or path.stat().st_size == 0:  # 0 bytes: created, nothing written yet
         return []
@@ -481,9 +497,9 @@ def read_frames(path: Path) -> list:
 
     try:
         traj = Trajectory(str(path), "r")
-    except Exception as exc:  # truncated header, file being created
+    except Exception as exc:
         print(f"[md-analysis] cannot open {path}: {type(exc).__name__}: {exc}")
-        return []
+        raise UnreadableTrajectory(f"{path.name}: {type(exc).__name__}: {exc}") from exc
     frames = []
     try:
         for index in range(len(traj)):
@@ -619,8 +635,12 @@ def summarize_trajectory(
         row["status"] = "no_production" if len(frames) else "missing"
         return row
     persistent = production["desorbed_persistent"].astype(int) == 1
-    complete = expected_production_frames is not None and n_production >= expected_production_frames
-    row["status"] = "complete" if complete else "partial"
+    if expected_production_frames is not None and n_production > expected_production_frames:
+        row["status"] = "overfull"
+    elif expected_production_frames is not None and n_production == expected_production_frames:
+        row["status"] = "complete"
+    else:
+        row["status"] = "partial"
     at_start = production["nearest_site"] == site
     desorbed = production["desorbed"].astype(int) == 1
     displacement = np.sqrt(production["msd_lateral_ang2"].to_numpy(dtype=float))
@@ -628,6 +648,9 @@ def summarize_trajectory(
         "production_time_fs": float(production["time_fs"].iloc[-1]),
         "nearest_site_at_production_start": str(production["nearest_site"].iloc[0]),
         "fraction_production_at_start_site": float(at_start.mean()),
+        "fraction_production_adsorbed_at_start_site": float(
+            ((production["site_assignment"] == site) & ~persistent).mean()
+        ),
         "fraction_production_desorbed": float(desorbed.mean()),
         "first_leave_start_site_fs": (
             float(production.loc[~at_start, "time_fs"].iloc[0]) if (~at_start).any() else float("nan")
@@ -727,6 +750,13 @@ def analyze_run(
                     seed_dir, seed, model, site, threshold, log_interval, settings["timestep_fs"],
                     persistence_frames, site_radius,
                 )
+            except UnreadableTrajectory as exc:
+                print(f"[md-analysis] {material}/{site}/seed_{seed}: UNREADABLE trajectory ({exc}); "
+                      "the seed is left out.")
+                row = summarize_trajectory(material, site, seed, empty, expected)
+                row["status"] = "unreadable"
+                summary_rows.append(row)
+                continue
             except ValueError as exc:
                 print(f"[md-analysis] {material}/{site}/seed_{seed}: skipped ({exc})")
                 row = summarize_trajectory(material, site, seed, empty, expected)
@@ -742,7 +772,8 @@ def analyze_run(
             print(
                 f"[md-analysis] {material}/{site}/seed_{seed}: {last['n_equilibration_frames']} eq + "
                 f"{last['n_production_frames']} production frames ({last['status']}); "
-                f"at start site {last['fraction_production_at_start_site']:.2f}, "
+                f"at start site {last['fraction_production_at_start_site']:.2f} "
+                f"(adsorbed, within the site radius {last['fraction_production_adsorbed_at_start_site']:.2f}), "
                 f"desorbed {last['fraction_production_desorbed']:.2f} "
                 f"(persistent {last['fraction_production_desorbed_persistent']:.2f}), "
                 f"other {last['fraction_production_other']:.2f}"
@@ -751,12 +782,16 @@ def analyze_run(
             if seed not in present:
                 summary_rows.append(summarize_trajectory(material, site, seed, empty, expected))
                 print(f"[md-analysis] {material}/{site}/seed_{seed}: not found (missing).")
+        path = results_dir / "md" / material / site / FRAME_ANALYSIS_FILENAME
         if tables:
             table = pd.concat(tables, ignore_index=True)
             site_frames[site] = table
-            path = results_dir / "md" / material / site / FRAME_ANALYSIS_FILENAME
             table.to_csv(path, index=False)
             print(f"[md-analysis] wrote {path} ({len(table)} frames)")
+        elif path.is_file():
+            # No readable seed left: a frame file of an earlier analysis would be stale.
+            path.unlink()
+            print(f"[md-analysis] removed stale {path} (no readable seed of {site})")
     summary = pd.DataFrame(summary_rows, columns=SUMMARY_COLUMNS)
     return site_frames, summary
 
@@ -815,6 +850,11 @@ def plot_occupancy(site_frames: dict[str, pd.DataFrame], path: Path, timestep_fs
     return True
 
 
+def plot_path(output_dir: Path, material: str, explicit_output_dir: bool) -> Path:
+    """OUT/<plot> with --output-dir; <results-dir>/md/<material>/<plot> by default."""
+    return output_dir / PLOT_FILENAME if explicit_output_dir else output_dir / "md" / material / PLOT_FILENAME
+
+
 def main(argv=None) -> int:
     args = parse_args(argv)
     results_dir = args.results_dir.expanduser().resolve()
@@ -858,7 +898,7 @@ def main(argv=None) -> int:
     if not args.no_plot:
         plot_occupancy(
             site_frames,
-            output_dir / "md" / args.material / PLOT_FILENAME,
+            plot_path(output_dir, args.material, args.output_dir is not None),
             settings["timestep_fs"],
             settings["log_interval"],
         )

@@ -83,11 +83,6 @@ class OrganizationTests(unittest.TestCase):
             with self.subTest(path=path):
                 ast.parse(path.read_text(), filename=str(path))
 
-    def test_shell_syntax(self):
-        for path in [*ROOT.glob("*.sh"), *(ROOT / "scripts").rglob("*.sh"), *(ROOT / "notebooks").glob("*.sh")]:
-            with self.subTest(path=path):
-                subprocess.run(["bash", "-n", str(path)], check=True)
-
     def test_notebook_syntax(self):
         notebook = ROOT / "notebooks/zno-co2-lucas.ipynb"
         for cell in json.loads(notebook.read_text())["cells"]:

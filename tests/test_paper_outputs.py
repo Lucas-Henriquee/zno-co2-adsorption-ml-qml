@@ -10,6 +10,7 @@ import matplotlib
 
 matplotlib.use("Agg")
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -122,14 +123,17 @@ def _md(run: Path, analysis: Path, sites=SITES, seeds=("1", "2")) -> None:
                     "desorbed_persistent": int(desorbing), "site_assignment": assignment,
                 })
             frames.append(dict(frames[-1], phase="equilibration", time_fs=0.0))
+            desorbing_seed = site == "top_oxygen" and seed == "2"
             summary.append({
                 "material": MAT, "site": site, "seed": seed, "status": "complete",
-                "n_production_frames": 6, "fraction_production_at_start_site": 4 / 6,
-                "fraction_production_desorbed_persistent": 0.5 if (site == "top_oxygen" and seed == "2") else 0.0,
+                "n_production_frames": 6, "fraction_production_at_start_site": 1.0,
+                "fraction_production_adsorbed_at_start_site": 3 / 6 if desorbing_seed else 4 / 6,
+                "fraction_production_desorbed_persistent": 0.5 if desorbing_seed else 0.0,
             })
         _write_csv(run / "md" / MAT / site / "md_frame_analysis.csv", frames)
     summary.append({"material": MAT, "site": "bridge", "seed": "9", "status": "missing",
                     "n_production_frames": 0, "fraction_production_at_start_site": "",
+                    "fraction_production_adsorbed_at_start_site": "",
                     "fraction_production_desorbed_persistent": ""})
     _write_csv(analysis / "science" / "md" / "md_trajectory_analysis_summary.csv", summary)
 
@@ -178,12 +182,13 @@ def test_figures_written_with_plotted_data(full):
             assert (out / f"{name}{suffix}").stat().st_size > 0, name + suffix
 
     fig03 = pd.read_csv(out / "fig03_dft_descriptors_data.csv")
-    assert set(fig03["panel"]) == {"adsorption_energy", "c_surface_distance", "band_gap"}
+    assert set(fig03["panel"]) == {"adsorption_energy", "c_height_above_top_atom", "band_gap"}
     eads = fig03[fig03["panel"] == "adsorption_energy"].set_index("site")
     assert eads.loc["top_metal", "value"] == pytest.approx(0.042)
     assert eads.loc["bridge", "value"] == pytest.approx(-0.025)
-    dist = fig03[fig03["panel"] == "c_surface_distance"].set_index("site")
+    dist = fig03[fig03["panel"] == "c_height_above_top_atom"].set_index("site")
     assert (dist["quantity"] == "c_surface_distance_ang").all()
+    assert (dist["label"] == "C height above the topmost surface atom").all()
     assert dist.loc["bridge", "value"] == pytest.approx(2.9)
     gaps = fig03[fig03["panel"] == "band_gap"].set_index(["site", "quantity"])["value"]
     assert gaps[("bridge", "clean_band_gap_gamma_ev")] == pytest.approx(1.70)
@@ -192,10 +197,13 @@ def test_figures_written_with_plotted_data(full):
     fig04 = pd.read_csv(out / "fig04_tddft_spectra_data.csv")
     assert set(fig04["site"]) == set(SITES)
     assert fig04["energy_ev"].min() == pytest.approx(3.0)
-    assert fig04["energy_ev"].max() == pytest.approx(13.0)  # max(13 eV, last transition + 4 sigma)
-    assert set(fig04["curve"]) == {"ZnO | top-metal", "ZnO | top-oxygen", "ZnO | bridge"}
-    assert fig04["peak_energy_ev"].to_numpy() == pytest.approx(11.0, abs=0.01)
-    assert fig04.groupby("site")["peak_absorption_au"].max().max() == pytest.approx(1.0)
+    assert fig04["energy_ev"].max() == pytest.approx(11.4)  # last written transition + 4 sigma
+    assert set(fig04["curve"]) == {"top metal", "top oxygen", "bridge"}
+    # Two main peaks, shared by the three sites (identical spectra here).
+    assert fig04["main_peak_1_energy_ev"].to_numpy() == pytest.approx(9.52, abs=0.01)
+    assert fig04["main_peak_2_energy_ev"].to_numpy() == pytest.approx(11.0, abs=0.01)
+    assert fig04["site_peak_2_energy_ev"].to_numpy() == pytest.approx(11.0, abs=0.01)
+    assert fig04["main_peak_2_absorption_au"].max() == pytest.approx(1.0, abs=1e-3)
     # One common normalisation factor: the global maximum is 1 and the ratio is the raw one.
     assert fig04["absorption_au"].max() == pytest.approx(1.0)
     ratio = fig04["absorption_au"] / fig04["intensity_per_ev"]
@@ -215,7 +223,7 @@ def test_figures_written_with_plotted_data(full):
     assert len(fig06) == 3 * 6  # one seed per site, production frames only
     assert set(fig06["seed"]) == {"2"}
     assert fig06["time_ps"].min() == pytest.approx(0.0) and fig06["time_ps"].max() == pytest.approx(0.1)
-    top_oxygen = fig06[fig06["site"] == "top_oxygen"]["co2_surface_distance_ang"].to_numpy()
+    top_oxygen = fig06[fig06["site"] == "top_oxygen"]["shortest_co2_surface_distance_ang"].to_numpy()
     assert top_oxygen[-1] == pytest.approx(5.0)
 
     fig07 = pd.read_csv(out / "fig07_neb_profiles_data.csv")
@@ -303,13 +311,19 @@ def test_table02(full):
     assert "top_metal -> bridge: endpoint not a minimum" in table.loc["bridge", "neb_paths"]
     assert "bridge -> top_oxygen: fwd < 0.03 eV, rev 0.0427 eV" in table.loc["top_oxygen", "neb_paths"]
     assert table.loc["bridge", "md_n_trajectories"] == 2  # the missing seed is not counted
+    assert table.loc["bridge", "md_n_partial"] == 0
     assert table.loc["top_oxygen", "md_fraction_desorbed_persistent_mean"] == pytest.approx(0.25)
+    assert table.loc["top_oxygen", "md_fraction_adsorbed_at_start_site_mean"] == pytest.approx(7 / 12)
+    assert table.loc["top_oxygen", "md_fraction_adsorbed_at_start_site_min"] == pytest.approx(0.5)
+    assert table.loc["top_oxygen", "md_fraction_adsorbed_at_start_site_max"] == pytest.approx(4 / 6)
     assert table.loc["top_metal", "tddft_first_excitation_ev"] == pytest.approx(8.18)
     assert not any("rank" in column for column in table.columns)
 
     md = (paper / "table02_site_summary.md").read_text()
     tex = (paper / "table02_site_summary.tex").read_text()
-    assert "+0.042" in md and "-1.98" in md and "unbound" in md and "0.25 (n=2)" in md
+    assert "+0.042" in md and "-1.98" in md and "unbound" in md and "0.25 (0.00–0.50, n=2)" in md
+    assert "0.58 (0.50–0.67, n=2)" in md and "Shortest C–surface distance (Å)" in md
+    assert r"Shortest C--surface distance (\AA)" in tex and "0.25 (0.00--0.50, n=2)" in tex
     assert "< 0.03 eV" in md and "8.180" in md
     assert "~0.05 eV" in md and "~0.1 V" in md
     assert r"\toprule" in tex and r"\bottomrule" in tex and r"top\_metal" in tex
@@ -334,33 +348,64 @@ def test_table02_missing_dft_summary_is_an_error(tmp_path):
         _tables(run, tmp_path / "A")
 
 
-def test_desorbed_frames_do_not_count_as_start_site(tmp_path):
-    """site_assignment is lateral: a CO2 desorbed above its start site must not count as there."""
-    from scripts.analysis.paper_tables import md_for, occupancy_fractions
+def _md_row(seed, status, start, desorbed, **extra):
+    return {"material": "ZnO", "site": "top_metal", "seed": seed, "status": status,
+            "fraction_production_at_start_site": "1.0",
+            "fraction_production_adsorbed_at_start_site": start,
+            "fraction_production_desorbed_persistent": desorbed, **extra}
 
-    fractions = occupancy_fractions(
-        ["top_metal", "top_metal", "top_metal", "bridge", "other"], [1, 1, 0, 0, 0], "top_metal"
-    )
-    assert fractions == pytest.approx(
-        {"start site": 0.2, "other sites": 0.2, "other": 0.2, "desorbed": 0.4}
-    )
-    assert sum(fractions.values()) == pytest.approx(1.0)
 
-    site_dir = tmp_path / "RUN" / "md" / "ZnO" / "top_metal"
-    site_dir.mkdir(parents=True)
-    pd.DataFrame({
-        "seed": ["1"] * 4,
-        "phase": ["production"] * 4,
-        "site_assignment": ["top_metal"] * 4,
-        "desorbed_persistent": [0, 1, 1, 1],
-    }).to_csv(site_dir / "md_frame_analysis.csv", index=False)
-    summary = [{"material": "ZnO", "site": "top_metal", "seed": "1", "status": "complete",
-                "fraction_production_at_start_site": "1.0",
-                "fraction_production_desorbed_persistent": "0.75"}]
-    n, at_start, desorbed = md_for(summary, "ZnO", "top_metal", tmp_path / "RUN")
-    assert (n, at_start, desorbed) == (1, pytest.approx(0.25), pytest.approx(0.75))
-    # Without the frame file the summary's lateral fraction is the fallback.
-    assert md_for(summary, "ZnO", "top_metal", tmp_path / "none")[1] == pytest.approx(1.0)
+def test_md_for_reads_only_the_adsorbed_start_site_column(capsys):
+    from scripts.analysis.paper_tables import md_for
+
+    rows = [
+        _md_row("1", "complete", "0.08", "0.09"),
+        _md_row("2", "complete", "1.0", "0.0"),
+        _md_row("3", "partial", "0.15", "0.0"),
+        _md_row("4", "unreadable", "", ""),
+        _md_row("5", "overfull", "0.5", "0.0"),
+        _md_row("6", "missing", "", ""),
+    ]
+    md = md_for(rows, "ZnO", "top_metal")
+    assert (md["n"], md["n_partial"]) == (3, 1)
+    assert md["start_mean"] == pytest.approx((0.08 + 1.0 + 0.15) / 3)
+    assert (md["start_min"], md["start_max"]) == (pytest.approx(0.08), pytest.approx(1.0))
+    assert md["desorbed_mean"] == pytest.approx(0.03)
+    out = capsys.readouterr().out
+    assert "seed 4: unreadable" in out and "seed 5: overfull" in out and "seed 6" not in out
+    row = {"md_n_trajectories": 3, "md_n_partial": 1,
+           **{f"md_fraction_adsorbed_at_start_site_{k}": md[f"start_{k}"] for k in ("mean", "min", "max")}}
+    assert paper_tables.md_text(row, "md_fraction_adsorbed_at_start_site") == "0.41 (0.08–1.00, n=3, 1 partial)"
+    # A summary without the new column: no fallback to the nearest-site fraction.
+    old = [{key: value for key, value in rows[0].items() if key != "fraction_production_adsorbed_at_start_site"}]
+    assert md_for(old, "ZnO", "top_metal")["n"] == 0
+    assert "no fraction_production_adsorbed_at_start_site column" in capsys.readouterr().out
+
+
+def test_table02_reads_no_md_file_from_the_run(full):
+    run, analysis = full
+    for path in (run / "md").rglob("md_frame_analysis.csv"):
+        path.unlink()
+    assert _tables(run, analysis) == 0
+    table = pd.read_csv(analysis / "paper" / "table02_site_summary.csv").set_index("site")
+    assert table.loc["top_metal", "md_fraction_adsorbed_at_start_site_mean"] == pytest.approx(4 / 6)
+
+
+def test_table02_co2rr_validity_from_row_validity(full):
+    """Old corrected rows (no pathway_validity, status ok) are re-checked from geometry_flags."""
+    run, analysis = full
+    path = analysis / "science/co2rr/co2rr_corrected_summary.csv"
+    rows = list(csv.DictReader(path.open()))
+    for row in rows:
+        row.pop("pathway_validity")
+        row["status"] = "ok"
+        row["geometry_flags"] = "cooh_desorbed" if row["site"] == "bridge" else ""
+    _write_csv(path, rows)
+    assert _tables(run, analysis) == 0
+    table = pd.read_csv(analysis / "paper" / "table02_site_summary.csv").set_index("site")
+    assert table.loc["bridge", "co2rr_pathway_validity"] == "unbound"
+    assert math.isnan(table.loc["bridge", "limiting_potential_v"])
+    assert table.loc["top_metal", "co2rr_pathway_validity"] == "ok"
 
 
 # ---------------------------------------------------------------- fig03 / fig04 / fig05 / fig07 details
@@ -389,20 +434,52 @@ def test_fig04_layout(full):
     data = paper_figures.fig04_data(run, MAT, 0.10)
     fig = paper_figures.plot_fig04(data)
     ax = fig.axes[0]
-    assert ax.get_xlim() == pytest.approx((3.0, 13.0))
+    assert ax.get_xlim() == pytest.approx((3.0, 11.4))
     assert ax.get_ylabel() == "Normalized absorption (a.u.)"
     texts = [t.get_text() for t in ax.texts]
     assert "UV (400–200 nm)" in texts and "Vacuum UV (< 200 nm)" in texts
-    assert "top-metal\n11.00 eV" in texts
+    # Each main peak labelled once (not once per site), without site names.
+    assert sorted(t for t in texts if t.endswith(" eV")) == ["11.00 eV", "9.52 eV"]
     legend = [t.get_text() for t in ax.get_legend().get_texts()]
-    assert legend == ["ZnO | top-metal", "ZnO | top-oxygen", "ZnO | bridge"]
+    assert legend == ["top metal", "top oxygen", "bridge"]
+    # No vertical line other than the 400 nm and 200 nm region edges (no ionization threshold line).
+    vertical = {round(float(line.get_xdata()[0]), 3) for line in ax.get_lines() if len(set(line.get_xdata())) == 1}
+    assert vertical == {round(paper_figures.HC_EV_NM / 400.0, 3), round(paper_figures.HC_EV_NM / 200.0, 3)}
     top = [child for child in ax.get_children() if child.__class__.__name__ == "SecondaryAxis"]
-    assert top and list(top[0].get_xticks()) == [400, 300, 200, 150, 120, 100]
+    assert top and list(top[0].get_xticks()) == [400, 300, 200, 150, 120]
 
 
-def test_fig04_window_extends_past_13_ev():
+def test_fig04_window_ends_after_the_last_transition():
     spectra = {"top_metal": pd.DataFrame({"energy_ev": [9.0, 14.0]})}
     assert paper_figures.fig04_window(spectra, 0.1) == pytest.approx((3.0, 14.4))
+    spectra = {"top_metal": pd.DataFrame({"energy_ev": [8.2, 11.3]}), "bridge": pd.DataFrame({"energy_ev": [9.0]})}
+    assert paper_figures.fig04_window(spectra, 0.1) == pytest.approx((3.0, 11.7))
+
+
+def test_fig04_main_peaks_are_the_two_highest_local_maxima():
+    grid = np.linspace(0.0, 10.0, 1001)
+    curve = sum(h * np.exp(-0.5 * ((grid - e) / 0.2) ** 2) for e, h in ((2.0, 0.3), (5.0, 0.97), (8.0, 1.0)))
+    assert [round(grid[i], 2) for i in paper_figures.main_peaks(grid, curve)] == [5.0, 8.0]
+
+
+def test_fig06_has_no_seed_in_title_or_legend(full):
+    run, analysis = full
+    (run / "config.yaml").write_text("methods:\n  md:\n    temperature_kelvin: 300.0\n", encoding="utf-8")
+    assert _figures(run, analysis, "--md-seed", "2", "--figures", "fig06") == 0
+    data = paper_figures.fig06_data(run, analysis, MAT, "2")
+    fig = paper_figures.plot_fig06(data, paper_figures.md_temperature_text(run))
+    ax = fig.axes[0]
+    assert ax.get_title() == "AIMD at 300 K"
+    assert ax.get_ylabel() == "Shortest CO$_2$–surface distance (Å)"
+    legend = [t.get_text() for t in ax.get_legend().get_texts()]
+    assert legend == ["Top metal", "Top oxygen", "Bridge"]
+    assert not any("seed" in text.lower() for text in [ax.get_title(), *legend])
+
+
+def test_desorption_threshold_option_was_removed(full):
+    run, analysis = full
+    with pytest.raises(SystemExit):
+        _figures(run, analysis, "--desorption-threshold", "4.5")
 
 
 def test_fig05_legend_labels(full):

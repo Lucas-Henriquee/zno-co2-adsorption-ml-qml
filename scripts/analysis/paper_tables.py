@@ -2,15 +2,24 @@
 
 Inputs (paths of one simulation run RUN and one analysis run A):
 
-* ``RUN/dft_summary.csv`` (required): E_ads, final state, O-C-O angle, C-slab distance.
+* ``RUN/dft_summary.csv`` (required): E_ads, final state, O-C-O angle and the shortest
+  C-surface distance (``c_min_slab_distance_ang``: minimum-image distance from C to any slab
+  atom; not the C height of fig03(b)).
 * ``A/science/co2rr/co2rr_corrected_summary.csv``: U_L and limiting step of one variant
-  (default c); only rows with ``pathway_validity`` ok get a U_L, the others show their
-  validity ("unbound", "wrong intermediate").
+  (default c); the validity of a row comes from ``co2rr_corrections.row_validity`` (the same
+  function as everywhere else): only valid rows get a U_L, the others show their validity
+  ("unbound", "wrong intermediate").
 * ``A/science/neb/neb_barriers.csv``: every NEB path that starts or ends at the site.
   A barrier is given only when ``barrier_resolved`` / ``reverse_barrier_resolved`` is
   true; otherwise "endpoint not a minimum", "no saddle" or "< resolution".
-* ``A/science/md/md_trajectory_analysis_summary.csv``: fraction of production frames at
-  the start site and persistent desorbed fraction, mean over the seeds with data (n).
+* ``A/science/md/md_trajectory_analysis_summary.csv`` (the only MD input; nothing is read
+  from RUN): ``fraction_production_adsorbed_at_start_site`` (site assignment within the site
+  radius equal to the start site, persistently desorbed frames excluded) and
+  ``fraction_production_desorbed_persistent`` of every trajectory with status ``complete`` or
+  ``partial``. Printed as the mean with the per-seed range and the number of trajectories,
+  e.g. "0.41 (0.08–1.00, n=2)"; partial trajectories are counted and marked
+  ("n=3, 1 partial"). Other statuses (overfull, unreadable, error, ...) are left out and
+  reported. A summary without the column leaves the MD cells "n/a".
 * ``RUN/tddft_summary.csv``: first excitation of the isolated CO2 in the adsorbed geometry.
 
 Missing optional inputs leave their columns empty ("n/a") and print ``[skip]``.
@@ -25,11 +34,15 @@ import csv
 import math
 from pathlib import Path
 
+from scripts.analysis.co2rr_corrections import row_validity
+
 SITE_ORDER = ("top_metal", "top_oxygen", "bridge")
 SITE_DISPLAY = {"top_metal": "Top metal", "top_oxygen": "Top oxygen", "bridge": "Bridge"}
 EADS_UNCERTAINTY_EV = 0.05
 UL_UNCERTAINTY_V = 0.1
 MD_RUN_STATUSES = ("complete", "partial")
+MD_START_COLUMN = "fraction_production_adsorbed_at_start_site"
+MD_DESORBED_COLUMN = "fraction_production_desorbed_persistent"
 TABLE_NAME = "table02_site_summary"
 
 CSV_COLUMNS = (
@@ -46,8 +59,13 @@ CSV_COLUMNS = (
     "limiting_step",
     "neb_paths",
     "md_n_trajectories",
-    "md_fraction_at_start_site_mean",
+    "md_n_partial",
+    "md_fraction_adsorbed_at_start_site_mean",
+    "md_fraction_adsorbed_at_start_site_min",
+    "md_fraction_adsorbed_at_start_site_max",
     "md_fraction_desorbed_persistent_mean",
+    "md_fraction_desorbed_persistent_min",
+    "md_fraction_desorbed_persistent_max",
     "tddft_first_excitation_ev",
     "tddft_first_bright_excitation_ev",
 )
@@ -112,10 +130,6 @@ def co2rr_for(rows: list[dict[str, str]] | None, material: str, variant: str) ->
     return {row["site"]: row for row in selected}
 
 
-def co2rr_validity(row: dict[str, str]) -> str:
-    return str(row.get("pathway_validity") or row.get("status") or "").strip()
-
-
 def neb_entry(row: dict[str, str], digits: int) -> str:
     """Text of one NEB path: fwd = barrier from its initial site, rev = from its final site."""
     initial, final = row.get("initial_site", ""), row.get("final_site", "")
@@ -147,82 +161,43 @@ def neb_for(rows: list[dict[str, str]] | None, site: str, digits: int) -> str:
     return "; ".join(entries)
 
 
-OCCUPANCY_SITE_TYPES = ("top_metal", "top_oxygen", "bridge")
+MD_STATS = ("mean", "min", "max")
 
 
-def occupancy_fractions(site_assignment, desorbed_persistent, start_site: str) -> dict[str, float]:
-    """Production-frame fractions: persistently desorbed, else by lateral site assignment.
+def md_for(rows: list[dict[str, str]] | None, material: str, site: str) -> dict[str, float | int]:
+    """MD statistics of one site from the analysis summary rows.
 
-    site_assignment is lateral only, so a desorbed CO2 above its start site would count as
-    "start site"; desorbed frames therefore form their own category and the other three
-    categories are adsorbed frames. The four fractions add up to 1.
+    Trajectories with status complete or partial and finite values of both columns are
+    used (the same n for both means). Keys: n, n_partial, start_<mean|min|max>,
+    desorbed_<mean|min|max>.
     """
-    import numpy as np
-
-    assignment = np.asarray([str(value) for value in site_assignment])
-    desorbed = np.asarray(desorbed_persistent, dtype=float) == 1
-    if assignment.size == 0:
-        return {name: float("nan") for name in ("start site", "other sites", "other", "desorbed")}
-    adsorbed = ~desorbed
-    known = np.isin(assignment, OCCUPANCY_SITE_TYPES)
-    return {
-        "start site": float((adsorbed & (assignment == start_site)).mean()),
-        "other sites": float((adsorbed & known & (assignment != start_site)).mean()),
-        "other": float((adsorbed & ~known).mean()),
-        "desorbed": float(desorbed.mean()),
-    }
-
-
-def frame_fraction_at_start(results_dir: Path | None, material: str, site: str, seed: str) -> float:
-    """Adsorbed-at-start-site fraction of one trajectory from md_frame_analysis.csv (NaN if absent)."""
-    if results_dir is None:
-        return float("nan")
-    path = results_dir / "md" / material / site / "md_frame_analysis.csv"
-    if not path.exists():
-        return float("nan")
-    frames = [
-        row for row in read_rows(path)
-        if row.get("phase") == "production" and str(row.get("seed")) == str(seed)
-    ]
-    if not frames:
-        return float("nan")
-    fractions = occupancy_fractions(
-        [row.get("site_assignment", "") for row in frames],
-        [safe_float(row.get("desorbed_persistent")) for row in frames],
-        site,
-    )
-    return fractions["start site"]
-
-
-def md_for(
-    rows: list[dict[str, str]] | None, material: str, site: str, results_dir: Path | None = None
-) -> tuple[int, float, float]:
-    """(n trajectories, mean adsorbed-at-start-site fraction, mean persistent desorbed fraction).
-
-    The start-site fraction excludes persistently desorbed frames (from md_frame_analysis.csv);
-    without the frame file it falls back to the summary's lateral fraction.
-    """
+    result: dict[str, float | int] = {"n": 0, "n_partial": 0}
+    result.update({f"{key}_{stat}": float("nan") for key in ("start", "desorbed") for stat in MD_STATS})
     if rows is None:
-        return 0, float("nan"), float("nan")
-    used = [
-        row for row in rows
-        if row.get("material") == material and row.get("site") == site
-        and row.get("status") in MD_RUN_STATUSES
-        and is_finite(safe_float(row.get("fraction_production_at_start_site")))
-    ]
+        return result
+    site_rows = [row for row in rows if row.get("material") == material and row.get("site") == site]
+    if site_rows and MD_START_COLUMN not in site_rows[0]:
+        print(f"[skip] MD columns of {site}: summary has no {MD_START_COLUMN} column "
+              "(rerun md_trajectory_analysis)")
+        return result
+    used, left_out = [], []
+    for row in site_rows:
+        values = (safe_float(row.get(MD_START_COLUMN)), safe_float(row.get(MD_DESORBED_COLUMN)))
+        if row.get("status") in MD_RUN_STATUSES and all(is_finite(v) for v in values):
+            used.append((row.get("status"), *values))
+        elif row.get("status") not in ("missing", "not_started", "no_production"):
+            left_out.append(f"seed {row.get('seed', '')}: {row.get('status', '')}")
+    if left_out:
+        print(f"[paper] MD {site}: trajectories left out of Table 2 ({'; '.join(left_out)})")
     if not used:
-        return 0, float("nan"), float("nan")
-    start = []
-    for row in used:
-        value = frame_fraction_at_start(results_dir, material, site, row.get("seed", ""))
-        start.append(value if is_finite(value) else safe_float(row["fraction_production_at_start_site"]))
-    desorbed = [safe_float(row.get("fraction_production_desorbed_persistent")) for row in used]
-    desorbed = [value for value in desorbed if is_finite(value)]
-    return (
-        len(used),
-        sum(start) / len(start),
-        sum(desorbed) / len(desorbed) if desorbed else float("nan"),
-    )
+        return result
+    result["n"] = len(used)
+    result["n_partial"] = sum(1 for status, _, _ in used if status == "partial")
+    for index, key in ((1, "start"), (2, "desorbed")):
+        values = [entry[index] for entry in used]
+        result.update({f"{key}_mean": sum(values) / len(values), f"{key}_min": min(values),
+                       f"{key}_max": max(values)})
+    return result
 
 
 def tddft_for(rows: list[dict[str, str]] | None, material: str) -> dict[str, dict[str, str]]:
@@ -253,8 +228,8 @@ def build_table(
         row = dft[site]
         ok = row.get("dft_status") == "ok"
         c_row = co2rr.get(site, {})
-        validity = co2rr_validity(c_row) if c_row else ""
-        n_md, at_start, desorbed = md_for(md_rows, material, site, results_dir)
+        validity = row_validity(c_row) if c_row else ""
+        md = md_for(md_rows, material, site)
         t_row = tddft.get(site, {})
         table.append({
             "material": material,
@@ -272,9 +247,10 @@ def build_table(
             "limiting_step": c_row.get("limiting_step", "") if validity == "ok" else "",
             "neb_paths": neb_for(neb_rows, site, digits=4),
             "_neb_paths_rounded": neb_for(neb_rows, site, digits=3),
-            "md_n_trajectories": n_md,
-            "md_fraction_at_start_site_mean": at_start,
-            "md_fraction_desorbed_persistent_mean": desorbed,
+            "md_n_trajectories": md["n"],
+            "md_n_partial": md["n_partial"],
+            **{f"md_fraction_adsorbed_at_start_site_{stat}": md[f"start_{stat}"] for stat in MD_STATS},
+            **{f"md_fraction_desorbed_persistent_{stat}": md[f"desorbed_{stat}"] for stat in MD_STATS},
             "tddft_first_excitation_ev": safe_float(t_row.get("co2_isolated_first_excitation_ev")),
             "tddft_first_bright_excitation_ev": safe_float(t_row.get("co2_isolated_first_bright_excitation_ev")),
         })
@@ -297,11 +273,16 @@ def co2rr_text(row: dict[str, object]) -> str:
     return validity.replace("_", " ")
 
 
-def md_text(row: dict[str, object], key: str) -> str:
-    n = int(row["md_n_trajectories"])
-    if n == 0 or not is_finite(float(row[key])):
+def md_text(row: dict[str, object], prefix: str) -> str:
+    """'0.41 (0.08–1.00, n=2)', '0.41 (n=1)' or '0.41 (0.08–1.00, n=3, 1 partial)'."""
+    n, n_partial = int(row["md_n_trajectories"]), int(row["md_n_partial"])
+    mean = float(row[f"{prefix}_mean"])
+    if n == 0 or not is_finite(mean):
         return "n/a"
-    return f"{float(row[key]):.2f} (n={n})"
+    count = f"n={n}" + (f", {n_partial} partial" if n_partial else "")
+    if n == 1:
+        return f"{mean:.2f} ({count})"
+    return f"{mean:.2f} ({float(row[f'{prefix}_min']):.2f}–{float(row[f'{prefix}_max']):.2f}, {count})"
 
 
 def display_rows(table: list[dict[str, object]], variant: str) -> tuple[list[str], list[list[str]]]:
@@ -310,7 +291,7 @@ def display_rows(table: list[dict[str, object]], variant: str) -> tuple[list[str
         "E_ads (eV)",
         "Final state",
         "O-C-O (deg)",
-        "C-slab (A)",
+        "Shortest C–surface distance (Å)",
         f"U_L, variant {variant} (V)",
         "Limiting step",
         "NEB paths",
@@ -329,8 +310,8 @@ def display_rows(table: list[dict[str, object]], variant: str) -> tuple[list[str
             co2rr_text(row),
             str(row["limiting_step"]) or ("n/a" if row["co2rr_pathway_validity"] == "ok" else "-"),
             str(row["_neb_paths_rounded"]) or "n/a",
-            md_text(row, "md_fraction_at_start_site_mean"),
-            md_text(row, "md_fraction_desorbed_persistent_mean"),
+            md_text(row, "md_fraction_adsorbed_at_start_site"),
+            md_text(row, "md_fraction_desorbed_persistent"),
             fmt(float(row["tddft_first_excitation_ev"]), 3),
         ])
     return header, body
@@ -343,8 +324,11 @@ def footnotes(material: str, variant: str) -> list[str]:
         f"U_L: CHE limiting potential of CO2 -> CO, variant {variant}, only for pathway_validity ok. "
         "NEB: barrier given only when resolved in neb_barriers.csv (fwd = from initial site, rev = from final site); "
         "otherwise below the barrier resolution, no saddle or endpoint not a minimum.",
-        "MD: mean over the trajectories (n) of the production fractions adsorbed at the start site (lateral "
-        "site assignment, persistently desorbed frames excluded) and persistently desorbed (CO2-slab distance "
+        "Shortest C–surface distance: minimum distance from C to any slab atom (not the C height above the "
+        "topmost surface atom of Fig. 3b).",
+        "MD: mean over the trajectories with the per-seed range and n (partial = trajectory not finished) of "
+        "the production fractions adsorbed at the start site (site assignment within the site radius, "
+        "persistently desorbed frames excluded) and persistently desorbed (shortest CO2–surface distance "
         "above the threshold). TDDFT: isolated CO2 in the adsorbed geometry.",
         f"Material: {material}; DFT: GPAW PBE.",
     ]
@@ -373,12 +357,14 @@ LATEX_SPECIAL = {"\\": r"\textbackslash{}", "&": r"\&", "%": r"\%", "$": r"\$", 
 
 def latex_escape(text: str) -> str:
     out = "".join(LATEX_SPECIAL.get(char, char) for char in text)
-    return out.replace("->", r"$\rightarrow$").replace("< ", r"$<$ ")
+    out = out.replace("->", r"$\rightarrow$").replace("< ", r"$<$ ")
+    return out.replace("–", "--").replace("Å", r"\AA{}")
 
 
 def write_latex(path: Path, body: list[list[str]], notes: list[str], variant: str) -> None:
     header = [
-        "Site", r"$E_\mathrm{ads}$ (eV)", "Final state", r"O--C--O ($^\circ$)", r"C--slab (\AA)",
+        "Site", r"$E_\mathrm{ads}$ (eV)", "Final state", r"O--C--O ($^\circ$)",
+        r"Shortest C--surface distance (\AA)",
         rf"$U_\mathrm{{L}}$ ({latex_escape(variant)}, V)", "Limiting step", "NEB paths",
         "MD ads. at start", "MD desorbed", r"TDDFT $E_1$ (eV)",
     ]

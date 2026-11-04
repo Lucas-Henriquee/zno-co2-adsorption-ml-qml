@@ -6,10 +6,12 @@ must cover the GPAW-free subset; every shell script must pass ``bash -n``.
 """
 import ast
 import json
+import os
 import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -242,10 +244,8 @@ class EnvironmentFilesTest(unittest.TestCase):
 
 class ShellScriptsTest(unittest.TestCase):
     def shell_scripts(self) -> list[Path]:
-        scripts = sorted(ROOT.glob("*.sh"))
-        for directory in ("scripts/environment", "scripts/workflows", "notebooks"):
-            scripts.extend(sorted((ROOT / directory).glob("*.sh")))
-        return scripts
+        return [*sorted(ROOT.glob("*.sh")), *sorted((ROOT / "scripts").rglob("*.sh")),
+                *sorted((ROOT / "notebooks").glob("*.sh"))]
 
     def test_shell_scripts_parse(self):
         bash = shutil.which("bash")
@@ -278,6 +278,46 @@ class ShellScriptsTest(unittest.TestCase):
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertIn("--env", result.stdout)
+
+    def test_launchers_show_help_without_conda(self):
+        bash = shutil.which("bash")
+        if bash is None:
+            self.skipTest("bash is not available")
+        env = {**os.environ, "QML_ZNO_CONDA": "/nonexistent/conda"}
+        for path in sorted(ROOT.glob("run_*.sh")):
+            with self.subTest(launcher=path.name):
+                result = subprocess.run([bash, str(path), "--help"], capture_output=True, text=True,
+                                        env=env, cwd=ROOT, timeout=60)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn(f"Usage: ./{path.name}", result.stdout)
+                self.assertIn("python -m scripts.workflows.", result.stdout)
+
+    def test_no_capture_output_for_conda_and_mamba1_only(self):
+        bash = shutil.which("bash")
+        if bash is None:
+            self.skipTest("bash is not available")
+        with tempfile.TemporaryDirectory() as tmp:
+            managers = {
+                "conda": ("conda", "echo 'usage: conda run [--no-capture-output]'"),
+                "mamba1": ("mamba", "echo '  --no-capture-output  Do not capture output'"),
+                "mamba2": ("mamba", "echo 'Usage: mamba run [OPTIONS]'"),
+                "micromamba": ("micromamba", "echo '--no-capture-output'"),
+            }
+            expected = {"conda": True, "mamba1": True, "mamba2": False, "micromamba": False}
+            for label, (name, help_text) in managers.items():
+                folder = Path(tmp) / label
+                folder.mkdir()
+                tool = folder / name
+                tool.write_text(f"#!/usr/bin/env bash\n{help_text}\n", encoding="utf-8")
+                tool.chmod(0o755)
+                script = (f"source {ROOT / 'scripts/environment/conda_tools.sh'}; "
+                          f"find_manager {tool}; set_run_prefix envs/x; echo \"${{RUN_PREFIX[*]}}\"")
+                with self.subTest(manager=label):
+                    result = subprocess.run([bash, "-c", script], capture_output=True, text=True, timeout=60)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual("--no-capture-output" in result.stdout, expected[label], result.stdout)
+                    self.assertTrue(result.stdout.strip().endswith("run --no-capture-output -p envs/x")
+                                    if expected[label] else result.stdout.strip().endswith("run -p envs/x"))
 
 
 if __name__ == "__main__":

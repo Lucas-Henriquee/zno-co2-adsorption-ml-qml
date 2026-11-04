@@ -37,3 +37,6 @@ results/_local_archive_pre_audit/
 
 # Notebooks executed by notebooks/run_zno_notebook.sh.
 notebooks/*.executed.ipynb
+
+# GPAW restart files (80+ MB each); never tracked.
+*.gpw

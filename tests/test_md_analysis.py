@@ -269,6 +269,9 @@ def test_new_columns_summary_and_sensitivity(tmp_path, slab, model):
     assert row["fraction_production_desorbed_persistent"] == pytest.approx(5 / 8)
     assert row["first_desorbed_persistent_fs"] == pytest.approx(60.0)
     assert row["fraction_production_desorbed"] == pytest.approx(6 / 8)  # C-based single frame, as before
+    # Adsorbed at the start site: site_assignment == start AND not persistently desorbed (frames 0-2).
+    assert row["fraction_production_adsorbed_at_start_site"] == pytest.approx(3 / 8)
+    assert row["fraction_production_at_start_site"] == pytest.approx(6 / 8)  # nearest_site, desorbed included
 
     table = mta.desorption_sensitivity("ZnO", site_frames, [4.0, 4.5, 5.0], 3)
     assert list(table.columns) == mta.SENSITIVITY_COLUMNS
@@ -322,8 +325,47 @@ def test_output_dir_holds_run_level_files_and_frames_stay_in_the_run(tmp_path, s
     import importlib.util
 
     if importlib.util.find_spec("matplotlib") is not None:
-        expected_out.add(Path("md") / "ZnO" / mta.PLOT_FILENAME)
+        expected_out.add(Path(mta.PLOT_FILENAME))  # directly in OUT, not OUT/md/ZnO/
     assert in_out == expected_out
     assert in_run == {Path("md/ZnO/top_metal") / mta.FRAME_ANALYSIS_FILENAME,
                       Path("md/ZnO/bridge") / mta.FRAME_ANALYSIS_FILENAME}
     assert not (root / mta.SUMMARY_FILENAME).exists()
+
+
+def test_unreadable_trajectory_is_not_reported_as_missing(tmp_path, slab, model, capsys):
+    """A file with content that ASE cannot open (e.g. two writers) is 'unreadable', not 'missing'."""
+    zn = model.sites(slab.positions)["top_metal"][0]
+    md = tmp_path / "md" / "ZnO" / "top_metal"
+    write_traj(md / "seed_1" / "md_equilibration.traj", slab, [zn[:2]] * 2)
+    write_traj(md / "seed_1" / "md_production.traj", slab, [zn[:2]] * 3)
+    broken = md / "seed_2" / "md_equilibration.traj"
+    broken.parent.mkdir(parents=True)
+    broken.write_bytes(b"- of UlmASE-Trajectory" + b"{not json" * 20)
+    with pytest.raises(mta.UnreadableTrajectory):
+        mta.read_frames(broken)
+    _, summary = mta.analyze_run(tmp_path, "ZnO", model, settings(sites=["top_metal"], production_steps=40), 4.5)
+    status = dict(zip(summary["seed"], summary["status"]))
+    assert status == {"1": "complete", "2": "unreadable"}
+    assert "UNREADABLE" in capsys.readouterr().out
+
+
+def test_more_production_frames_than_expected_is_overfull(tmp_path, slab, model):
+    zn = model.sites(slab.positions)["top_metal"][0]
+    seed_dir = tmp_path / "md" / "ZnO" / "top_metal" / "seed_1"
+    write_traj(seed_dir / "md_equilibration.traj", slab, [zn[:2]])
+    write_traj(seed_dir / "md_production.traj", slab, [zn[:2]] * 6)  # e.g. two appending writers
+    _, summary = mta.analyze_run(tmp_path, "ZnO", model, settings(sites=["top_metal"], production_steps=40), 4.5)
+    assert summary["status"].tolist() == ["overfull"]  # 6 frames > 40 / 20 + 1
+    _, summary = mta.analyze_run(tmp_path, "ZnO", model, settings(sites=["top_metal"], production_steps=100), 4.5)
+    assert summary["status"].tolist() == ["complete"]
+
+
+def test_stale_frame_file_is_removed_when_no_seed_is_readable(tmp_path, slab, model):
+    seed_dir = tmp_path / "md" / "ZnO" / "bridge" / "seed_1"
+    seed_dir.mkdir(parents=True)
+    (seed_dir / "md_equilibration.traj").write_bytes(b"")  # not started
+    stale = tmp_path / "md" / "ZnO" / "bridge" / mta.FRAME_ANALYSIS_FILENAME
+    stale.write_text("seed,phase\n1,production\n", encoding="utf-8")
+    site_frames, _ = mta.analyze_run(tmp_path, "ZnO", model, settings(sites=["bridge"]), 4.5)
+    assert "bridge" not in site_frames
+    assert not stale.exists()
