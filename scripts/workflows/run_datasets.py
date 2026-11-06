@@ -205,7 +205,10 @@ def collect_inputs(
             except FileNotFoundError:
                 pass
         if "md_windows" in targets:
-            md_tables = find_md_summaries(source_results)
+            try:
+                md_tables = find_md_summaries(source_results)
+            except FileNotFoundError as exc:
+                fail(f"{exc}; the md_windows target needs the MD of the simulation run.")
             paths.extend(md_tables)
             # Optional per-frame site analysis (scripts/analysis/md_trajectory_analysis.py).
             paths.extend(

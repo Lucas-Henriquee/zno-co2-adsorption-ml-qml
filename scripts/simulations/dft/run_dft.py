@@ -1,5 +1,9 @@
 from __future__ import annotations
-from scripts.common.timer import timer, print0
+
+import os
+
+# Before GPAW (and NumPy's BLAS) is loaded: one OpenMP thread per MPI rank.
+os.environ.setdefault("OMP_NUM_THREADS", "1")
 
 import argparse
 import csv
@@ -7,6 +11,8 @@ import json
 import math
 from pathlib import Path
 from typing import Iterable
+
+from scripts.common.timer import timer, print0
 
 try:
     import numpy as np
@@ -109,8 +115,9 @@ def validate_inputs(materials: Iterable[str], sites: Iterable[str]) -> tuple[lis
     return list(materials), list(sites)
 
 
-# Fallbacks only make the SCF more conservative (mixer, maxiter). The smearing stays at
-# 0.05 eV: with a PBE gap of ~0.6-0.8 eV a wider one occupies the conduction band.
+# ZnO profiles: the fallbacks only make the SCF more conservative (mixer, maxiter). The
+# smearing stays at 0.05 eV: with a PBE gap of ~0.6-0.8 eV a wider one occupies the
+# conduction band. CEO2_EXTRA_PROFILES (wider smearing, lcao/fd) are tried for CeO2 only.
 OPTIMIZATION_PROFILES = (
     {"name": "base", "mode": "pw", "smearing": 0.05, "maxiter": 180, "mixer": (0.05, 5, 50)},
     {"name": "robust", "mode": "pw", "smearing": 0.05, "maxiter": 280, "mixer": (0.03, 7, 100)},

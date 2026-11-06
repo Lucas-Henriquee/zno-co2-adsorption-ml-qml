@@ -1,6 +1,10 @@
 """MD driver checks with an EMT stand-in for GPAW (no GPAW needed)."""
 
 import csv
+import fcntl
+import os
+import subprocess
+import sys
 
 import numpy as np
 import pytest
@@ -119,7 +123,7 @@ def test_same_seed_reproduces_trajectory(results):
     other = read_rows(results / "md/ZnO/bridge/seed_8/md_production_frames.csv")
     assert first[-1]["epot_ev"] != other[-1]["epot_ev"]
 
-    assert run(["--site", "bridge", "--seed", "7", *FAST]) == 0
+    assert run(["--site", "bridge", "--seed", "7", "--overwrite", *FAST]) == 0
     again = read_rows(results / "md/ZnO/bridge/seed_7/md_production_frames.csv")
     assert again == first
     # Seed 8 from the first invocation is kept; seed 7 was recomputed.
@@ -198,3 +202,135 @@ def test_nve_test_reports_drift(results):
     assert [float(row["timestep_fs"]) for row in rows] == [0.5, 1.0]
     assert all(np.isfinite(float(row["drift_mev_per_atom_per_ps"])) for row in rows)
     assert not (results / "md/ZnO/bridge/md_site_summary.csv").exists()
+
+
+def test_held_lock_stops_the_seed_before_writing(results, calls, capsys):
+    make_results(results)
+    seed_dir = results / "md/ZnO/bridge/seed_1234"
+    seed_dir.mkdir(parents=True)
+    with (seed_dir / run_md.LOCK_FILENAME).open("w") as holder:
+        fcntl.flock(holder, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        holder.write("4242\n")
+        holder.flush()
+        assert run(["--site", "bridge", *FAST]) == 1
+    assert "locked by another run_md (PID 4242" in capsys.readouterr().out
+    assert calls == [] and [p.name for p in seed_dir.iterdir()] == [run_md.LOCK_FILENAME]
+    assert not (results / "md/ZnO/bridge/md_site_summary.csv").exists()
+    # Released: the same seed now runs and the lock records this process.
+    assert run(["--site", "bridge", *FAST]) == 0
+    assert (seed_dir / run_md.LOCK_FILENAME).read_text().strip() == str(os.getpid())
+
+
+def test_lock_outcome_is_broadcast_to_every_rank(tmp_path, monkeypatch):
+    monkeypatch.setattr(run_md, "is_master", lambda: False)
+    monkeypatch.setattr(run_md, "broadcast", lambda value: "locked by another run_md (PID 7)")
+    with pytest.raises(run_md.TrajectoryLocked, match="PID 7"):
+        with run_md.trajectory_lock(tmp_path / "seed_1"):
+            pass
+    assert not (tmp_path / "seed_1").exists()  # only rank 0 touches the file
+
+
+def test_complete_seed_is_skipped_unless_overwrite(results, calls, capsys):
+    make_results(results)
+    assert run(["--site", "bridge", "--seeds", "1", "2", *FAST]) == 0
+    frames = read_rows(results / "md/ZnO/bridge/md_production_frames.csv")
+    assert run(["--site", "bridge", "--seeds", "1", "2", *FAST]) == 0
+    assert len(calls) == 2 and "seed 1: complete" in capsys.readouterr().out
+    assert read_rows(results / "md/ZnO/bridge/md_production_frames.csv") == frames
+    assert run(["--site", "bridge", "--seeds", "2", "--overwrite", *FAST]) == 0
+    assert len(calls) == 3
+    assert sorted(r["seed"] for r in read_rows(results / "md/ZnO/bridge/md_site_summary.csv")) == ["1", "2"]
+
+
+def test_incomplete_or_different_seed_needs_overwrite(results, calls, capsys):
+    make_results(results)
+    # An interrupted trajectory: files in seed_5, no rows in the site tables.
+    seed_dir = results / "md/ZnO/bridge/seed_5"
+    seed_dir.mkdir(parents=True)
+    (seed_dir / "md_equilibration.traj").write_bytes(b"partial")
+    assert run(["--site", "bridge", "--seeds", "5", *FAST]) == 1
+    out = capsys.readouterr().out
+    assert "incomplete production (0 of 4 production frames" in out and "--overwrite" in out
+    assert calls == [] and (seed_dir / "md_equilibration.traj").read_bytes() == b"partial"
+    assert run(["--site", "bridge", "--seeds", "5", "--overwrite", *FAST]) == 0
+    assert len(calls) == 1
+
+    # Complete, but with another friction: not skipped and not silently recomputed.
+    assert run(["--site", "bridge", "--seeds", "5", "--friction", "0.02", *FAST]) == 1
+    assert "recorded with different friction_per_fs" in capsys.readouterr().out
+    assert len(calls) == 1
+
+
+def test_seed_state_counts_frames_and_settings(results):
+    make_results(results)
+    assert run(["--site", "bridge", "--seeds", "3", *FAST]) == 0
+    site_dir = results / "md/ZnO/bridge"
+    settings = run_md.resolve_settings(run_md.parse_args(FAST), {})
+    assert run_md.seed_state(site_dir, 3, settings, "base")[0] == "complete"
+    assert run_md.seed_state(site_dir, 4, settings, "base")[0] == "absent"
+    assert run_md.seed_state(site_dir, 3, settings, "robust") == ("different", "recorded with different dft_profile")
+    assert run_md.seed_state(site_dir, 3, {**settings, "rng_stream": "per_site"}, "base")[0] == "different"
+    frames = read_rows(site_dir / "md_production_frames.csv")
+    with (site_dir / "md_production_frames.csv").open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(frames[0]))
+        writer.writeheader()
+        writer.writerows(frames[:-1])
+    assert run_md.seed_state(site_dir, 3, settings, "base") == (
+        "incomplete", "3 of 4 production frames in md_production_frames.csv")
+
+
+def test_rng_stream_defaults_to_shared_and_is_recorded(results):
+    sites = {"bridge": ("ok", "base"), "top_metal": ("ok", "base")}
+    make_results(results, sites)
+    assert run(["--sites", "bridge", "top_metal", "--seeds", "9", *FAST]) == 0
+    bridge = read_rows(results / "md/ZnO/bridge/md_production_frames.csv")
+    top = read_rows(results / "md/ZnO/top_metal/md_production_frames.csv")
+    # Same structure and seed: the shared stream gives the same trajectory on both sites.
+    assert [r["epot_ev"] for r in bridge] == [r["epot_ev"] for r in top]
+    assert {r["rng_stream"] for r in bridge} == {"shared"}
+    summary = read_rows(results / "md/ZnO/bridge/md_site_summary.csv")[0]
+    assert summary["rng_stream"] == "shared" and summary["omp_num_threads"] == os.environ["OMP_NUM_THREADS"]
+
+
+def test_per_site_rng_stream_decorrelates_sites(results):
+    make_results(results, {"bridge": ("ok", "base"), "top_metal": ("ok", "base")})
+    (results / "config.yaml").write_text("methods:\n  md:\n    rng_stream: per_site\n")
+    assert run(["--sites", "bridge", "top_metal", "--seeds", "9", *FAST]) == 0
+    bridge = read_rows(results / "md/ZnO/bridge/md_production_frames.csv")
+    top = read_rows(results / "md/ZnO/top_metal/md_production_frames.csv")
+    assert [r["epot_ev"] for r in bridge] != [r["epot_ev"] for r in top]
+    assert read_rows(results / "md/ZnO/bridge/md_site_summary.csv")[0]["rng_stream"] == "per_site"
+
+    expected = np.random.default_rng(np.random.SeedSequence([9, run_md.SITE_RNG_INDEX["bridge"]])).random(3)
+    assert np.array_equal(run_md.make_rng(9, "bridge", "per_site").random(3), expected)
+    assert np.array_equal(run_md.make_rng(9, "bridge", "shared").random(3), np.random.default_rng(9).random(3))
+    assert set(project_config.DFT_SITES) <= set(run_md.SITE_RNG_INDEX)
+    assert len(set(run_md.SITE_RNG_INDEX.values())) == len(run_md.SITE_RNG_INDEX)
+    with pytest.raises(SystemExit, match="rng_stream"):
+        run_md.resolve_settings(run_md.parse_args([]), {"methods": {"md": {"rng_stream": "random"}}})
+
+
+def test_production_yaml_uses_per_site_rng_stream():
+    import yaml
+
+    config = yaml.safe_load((project_config.ROOT_DIR / "configs/simulations/zno_production.yaml").read_text())
+    assert config["methods"]["md"]["rng_stream"] == "per_site"
+    assert run_md.resolve_settings(run_md.parse_args([]), config)["rng_stream"] == "per_site"
+    assert run_md.resolve_settings(run_md.parse_args([]), {})["rng_stream"] == "shared"
+
+
+@pytest.mark.parametrize("module", [
+    "scripts.simulations.md.run_md",
+    "scripts.simulations.dft.run_dft",
+    "scripts.simulations.neb.run_neb",
+    "scripts.simulations.neb.relax_neb_image",
+    "scripts.simulations.tddft.run_tddft",
+    "scripts.simulations.co2rr.run_co2rr_pathways",
+])
+def test_entry_points_default_to_one_openmp_thread(module):
+    code = f"import os, {module}; print(os.environ['OMP_NUM_THREADS'])"
+    env = {k: v for k, v in os.environ.items() if k != "OMP_NUM_THREADS"}
+    run_once = lambda env: subprocess.run([sys.executable, "-c", code], cwd=project_config.ROOT_DIR, env=env,
+                                          capture_output=True, text=True, check=True).stdout.strip()
+    assert run_once(env) == "1"
+    assert run_once({**env, "OMP_NUM_THREADS": "4"}) == "4"  # an explicit value is kept

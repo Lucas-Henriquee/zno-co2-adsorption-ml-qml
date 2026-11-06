@@ -18,6 +18,11 @@ quantity "O* formation from H2O" and is never part of the CO2 -> CO profile or U
 
 from __future__ import annotations
 
+import os
+
+# Before GPAW (and NumPy's BLAS) is loaded: one OpenMP thread per MPI rank.
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+
 import argparse
 import csv
 import hashlib

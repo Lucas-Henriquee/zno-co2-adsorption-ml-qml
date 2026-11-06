@@ -15,6 +15,7 @@ import csv
 import json
 import math
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -42,6 +43,9 @@ TERM_LABELS = {"co2_star": "CO2*", "cooh": "COOH*", "co": "CO*", "o": "O*"}
 CALC_SUFFIXES = {".txt", ".log", ".json", ".traj", ".csv", ".xyz", ".cif", ".gpw"}
 IGNORED_PARTS = {"failed_attempts", "data", "logs"}
 IGNORED_NAMES = {"run_manifest.json", "config.yaml"}
+SEED_DIR = re.compile(r"seed_\d+")
+# Trajectory statuses of md_trajectory_analysis that point at a damaged trajectory.
+MD_PROBLEM_STATUSES = ("unreadable", "overfull")
 
 
 # --------------------------------------------------------------------------- styling
@@ -306,10 +310,14 @@ def section_co2rr(ctx: Context, state: str) -> None:
     for material in ctx.materials:
         for site in ctx.sites:
             row = rows_by_key.get((material, site), {})
+            validity = co2rr_validity(row)
+            valid = validity in ("", "ok")
+            # An unbound or wrong intermediate has no limiting potential (nor limiting step).
+            progress = co2rr_progress(ctx, state, material, site, row) if valid else red(validity)
+            u_l = row.get("limiting_potential_v") if valid else None
             rows.append([f"{material} {site}", fmt(row.get(f"{p}_CO2_to_COOH_ev")), fmt(row.get(f"{p}_COOH_to_CO_ev")),
                          fmt(row.get(f"{p}_CO_desorption_ev")), fmt(row.get(f"{p}_overall_ev")),
-                         fmt(row.get("limiting_potential_v")), fmt(row.get("magmom_COOH_star_final"), ".2f"),
-                         co2rr_progress(ctx, state, material, site, row)])
+                         fmt(u_l), fmt(row.get("magmom_COOH_star_final"), ".2f"), progress])
     table(columns, rows)
     for row in rows_by_key.values():
         notes = [f"imaginary {row['imaginary_modes']}" if row.get("imaginary_modes") else "",
@@ -319,6 +327,17 @@ def section_co2rr(ctx: Context, state: str) -> None:
             print("   " + dim(f"{row.get('site')}: " + " · ".join(notes)))
     if rows_by_key:
         print("   " + dim(f"{p} in eV at U = 0 V vs RHE; total = CO2(g) + 2(H+ + e-) → CO(g) + H2O (exp. ≈ +0.20 eV)"))
+
+
+def co2rr_validity(row: dict[str, str]) -> str:
+    """ok, unbound or wrong_intermediate ("" without a row); older summaries are judged by geometry_flags."""
+    if not row:
+        return ""
+    try:
+        from scripts.analysis.co2rr_corrections import row_validity
+    except Exception:
+        return str(row.get("pathway_validity") or "")
+    return row_validity(row)
 
 
 def co2rr_progress(ctx: Context, state: str, material: str, site: str, row: dict[str, str]) -> str:
@@ -363,12 +382,17 @@ def section_md(ctx: Context, state: str) -> None:
               f"friction {settings.get('friction_per_fs', '?')} fs⁻¹ · {eq_target} eq + {prod_target} prod steps · seeds {seeds}"))
     columns = [Column("trajectory", 30, "<"), Column("equil.", 12), Column("production", 13), Column("⟨T⟩/K", 8),
                Column("⟨C-slab⟩/Å", 12), Column("⟨O-C-O⟩/°", 11), Column("status / progress")]
+    analysis = {(r.get("material"), r.get("site"), r.get("seed")): r.get("status", "")
+                for r in read_csv(ctx.root / "md_trajectory_analysis_summary.csv")
+                if r.get("status") in MD_PROBLEM_STATUSES}
     rows = []
     for material in ctx.materials:
         for site in ctx.sites:
             site_dir = ctx.root / "md" / material / site
             summary = {r.get("seed"): r for r in read_csv(site_dir / "md_site_summary.csv")}
-            seed_dirs = sorted(site_dir.glob("seed_*")) if site_dir.is_dir() else []
+            # Only seed_<n>; renamed copies such as seed_3456_corrupted_dup are not trajectories.
+            seed_dirs = sorted(path for path in site_dir.glob("seed_*")
+                               if path.is_dir() and SEED_DIR.fullmatch(path.name)) if site_dir.is_dir() else []
             if not seed_dirs:
                 rows.append([f"{material} {site}", "—", "—", "—", "—", "—",
                              dim("waiting") if state in ("running", "pending") else dim("—")])
@@ -377,7 +401,11 @@ def section_md(ctx: Context, state: str) -> None:
                 row = summary.get(seed, {})
                 eq = md_steps(seed_dir / "md_equilibration.traj", interval)
                 prod = md_steps(seed_dir / "md_production.traj", interval)
-                if row.get("md_status"):
+                problem = (trajectory_problem(seed_dir, eq_target, prod_target, interval)
+                           or analysis.get((material, site, seed), ""))
+                if problem:
+                    progress = red(problem)
+                elif row.get("md_status"):
                     progress = ok_badge(row["md_status"])
                 elif is_active(seed_dir):
                     progress = yellow("production" if (seed_dir / "md_production.traj").is_file() else "equilibration")
@@ -397,11 +425,12 @@ def is_active(folder: Path, minutes: float = 15.0) -> bool:
 
 def md_steps(path: Path, interval: int) -> int:
     """MD steps covered by a trajectory written every `interval` steps (frame 0 is the start)."""
-    return max(trajectory_frames(path) - 1, 0) * interval
+    return max((trajectory_frames(path) or 0) - 1, 0) * interval
 
 
-def trajectory_frames(path: Path) -> int:
-    if not path.is_file():
+def trajectory_frames(path: Path) -> int | None:
+    """Frames in an ASE trajectory: 0 when absent or empty, None when it cannot be read."""
+    if not path.is_file() or path.stat().st_size == 0:
         return 0
     try:
         from ase.io.trajectory import Trajectory
@@ -409,7 +438,18 @@ def trajectory_frames(path: Path) -> int:
         with Trajectory(str(path)) as trajectory:
             return len(trajectory)
     except Exception:
-        return 0
+        return None
+
+
+def trajectory_problem(seed_dir: Path, eq_target: int, prod_target: int, interval: int) -> str:
+    """'unreadable' or 'overfull' (more frames than the steps allow, e.g. two writers), else ''."""
+    for name, target in (("md_equilibration.traj", eq_target), ("md_production.traj", prod_target)):
+        frames = trajectory_frames(seed_dir / name)
+        if frames is None:
+            return "unreadable"
+        if target > 0 and frames > target // interval + 1:
+            return "overfull"
+    return ""
 
 
 def section_neb(ctx: Context, state: str) -> None:

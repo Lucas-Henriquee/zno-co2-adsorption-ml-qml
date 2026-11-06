@@ -123,3 +123,72 @@ def test_neb_table_flags_endpoint_not_minimum(tmp_path, monkeypatch):
     assert "90+40" in text
     assert "endpoint not a band minimum (IS dip 0.103, FS dip 0.036 eV)" in text
     assert "no internal saddle" in text and "climb skipped" in text
+
+
+def _md_co2rr_run(tmp_path, monkeypatch):
+    run = tmp_path / "r3"
+    run.mkdir()
+    (run / "run_manifest.json").write_text(json.dumps({
+        "materials": ["ZnO"], "sites": ["top_metal", "bridge"], "resolved_methods": ["co2rr", "md"],
+        "methods": {"co2rr": {"status": "completed"}, "md": {"status": "completed"}},
+    }))
+    (run / "config.yaml").write_text(
+        "methods:\n  md:\n    equilibration_steps: 40\n    production_steps: 40\n    log_interval: 20\n"
+        "    seeds: [1, 2]\n")
+    monkeypatch.setattr(run_status, "SIMULATIONS_DIR", tmp_path)
+    return run
+
+
+def _render_r3():
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        run_status.main(["r3", "--no-color"])
+    return out.getvalue()
+
+
+def _write_traj(path, n_frames):
+    from ase import Atoms
+    from ase.io import write
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    write(path, [Atoms("CO2", positions=[(0, 0, 0), (0, 0, 1.16), (0, 0, -1.16)])] * n_frames)
+
+
+def test_md_table_ignores_renamed_seed_dirs_and_flags_damaged_trajectories(tmp_path, monkeypatch):
+    run = _md_co2rr_run(tmp_path, monkeypatch)
+    site = run / "md/ZnO/bridge"
+    _write_traj(site / "seed_1/md_equilibration.traj", 3)
+    _write_traj(site / "seed_1/md_production.traj", 5)  # 40 / 20 + 1 = 3 expected: overfull
+    (site / "seed_2").mkdir()
+    (site / "seed_2/md_equilibration.traj").write_bytes(b"two writers at once")
+    _write_traj(site / "seed_3456_corrupted_dup/md_production.traj", 3)
+    (site / "md_site_summary.csv").write_text("material,site,seed,md_status\nZnO,bridge,1,ok\n")
+    text = _render_r3()
+    assert "seed 3456" not in text and "corrupted" not in text
+    rows = {line.split("·")[1].split()[1]: line for line in text.splitlines() if "ZnO bridge · seed" in line}
+    assert rows["1"].rstrip().endswith("overfull")  # wins over md_status ok
+    assert rows["2"].rstrip().endswith("unreadable")
+
+    # A status from md_trajectory_analysis is shown even when the files look fine.
+    _write_traj(site / "seed_1/md_production.traj", 3)
+    (run / "md_trajectory_analysis_summary.csv").write_text(
+        "material,site,seed,status\nZnO,bridge,1,unreadable\nZnO,bridge,2,complete\n")
+    rows = {line.split("·")[1].split()[1]: line for line in _render_r3().splitlines() if "ZnO bridge · seed" in line}
+    assert rows["1"].rstrip().endswith("unreadable")
+
+
+def test_co2rr_table_derives_validity_from_geometry_flags(tmp_path, monkeypatch):
+    run = _md_co2rr_run(tmp_path, monkeypatch)
+    # An older summary: no pathway_validity column, U_L written for every site.
+    (run / "co2rr_pathway_summary.csv").write_text(
+        "material,site,pathway_status,limiting_potential_v,limiting_step,geometry_flags\n"
+        "ZnO,top_metal,ok,-0.611,CO2->COOH*,cooh_desorbed\n"
+        "ZnO,bridge,ok,-0.523,CO2->COOH*,\n")
+    assert run_status.co2rr_validity({"geometry_flags": "cooh_deprotonated"}) == "wrong_intermediate"
+    assert run_status.co2rr_validity({}) == ""
+    lines = {}
+    for line in _render_r3().splitlines():  # the CO2RR table comes before the MD table
+        if line.strip().startswith("ZnO "):
+            lines.setdefault(line.split()[1], line)
+    assert "-0.611" not in lines["top_metal"] and lines["top_metal"].rstrip().endswith("unbound")
+    assert "-0.523" in lines["bridge"] and "unbound" not in lines["bridge"]

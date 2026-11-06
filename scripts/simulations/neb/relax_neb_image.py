@@ -39,6 +39,11 @@ be imported and tested without GPAW.
 """
 from __future__ import annotations
 
+import os
+
+# Before GPAW (and NumPy's BLAS) is loaded: one OpenMP thread per MPI rank.
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+
 import argparse
 import json
 import math

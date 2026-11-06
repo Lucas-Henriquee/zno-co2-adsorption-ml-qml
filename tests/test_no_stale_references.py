@@ -19,6 +19,9 @@ STALE_PATTERNS = (
     "tddft_onset_ev",         # TDDFT energies in Hartree labelled as eV
     "reduction_proxy_score",  # ad hoc score with a -0.70 eV target
     "run_pipeline.py",        # flat-layout pipeline writing into results/
+    "TARGET_ADSORPTION_ENERGY_EV",  # screening targets of the frozen first campaign
+    "TARGET_BAND_GAP_EV",
+    "TARGET_ONSET_EV",
 )
 
 # Paths that may mention the patterns: the archive, the legacy code, this test, tests

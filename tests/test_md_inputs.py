@@ -63,6 +63,23 @@ class MDInputTests(unittest.TestCase):
             with self.assertRaises(FileNotFoundError):
                 find_md_summaries(Path(tmp))
 
+    def test_missing_md_is_an_error_message_not_a_traceback(self):
+        from unittest import mock
+
+        from scripts.datasets import prepare_multitech_dataset
+
+        with tempfile.TemporaryDirectory() as tmp:
+            config = {"input": {}, "methods": {"multitech": {"targets": ["md_windows"]}}}
+            with self.assertRaises(SystemExit) as raised:
+                collect_inputs("multitech", config, Path(tmp), None)
+            self.assertTrue(str(raised.exception.code).startswith("[error] No MD production tables"))
+
+            argv = ["prepare_multitech_dataset", "--results-dir", tmp, "--output-dir", tmp,
+                    "--targets", "md_windows"]
+            with mock.patch("sys.argv", argv), self.assertRaises(SystemExit) as raised:
+                prepare_multitech_dataset.main()
+            self.assertTrue(str(raised.exception.code).startswith("[error] No MD production tables"))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -116,6 +116,10 @@ methods:
     # One independent trajectory per seed (md/<material>/<site>/seed_<n>); the grouped
     # ML split needs >= 2 per site and grouped CV inside training needs >= 3.
     seeds: [1234, 2345, 3456]
+    # per_site: generator from SeedSequence([seed, site index]), so sites with the same
+    # seed and atom ordering do not share velocities and Langevin noise. A config.yaml
+    # without this key (older runs) uses "shared" (seed only), as those runs did.
+    rng_stream: per_site
     nve_test_steps: 200  # only with run_md.py --nve-test
     nve_test_timesteps_fs: [0.5, 1.0]
     ecut_ev: 500.0

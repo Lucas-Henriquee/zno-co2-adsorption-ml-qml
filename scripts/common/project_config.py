@@ -36,8 +36,10 @@ MATERIALS: dict[str, MaterialSpec] = {
         metal_symbol="Zn",
         structure="wurtzite",
         miller_index=(1, 0, 0),
-        # 2x1 surface cell (6.50 x 5.21 A): CO2 stays >= 4.18 A from its periodic
-        # copy for the three sites; a CO2 lying along y would need 2x2.
+        # 2x1 surface cell (6.50 x 5.21 A): the CO2 of the three adsorption sites and of
+        # the carbonate start lies in the xz plane and stays >= 4.18 A from its periodic
+        # copy. Along y (the exploratory tridentate start) its O atoms come ~2.9 A from
+        # the next copy; this cell is not converged for that start (repeat (2, 2, 1) is).
         repeat=(2, 1, 1),
     ),
     "TiO2": MaterialSpec(
@@ -77,11 +79,6 @@ CO2_SITE_HEIGHTS = {
 # Bent CO2 for the carbonate start (O-C-O angle and C-O length of an activated CO2).
 CARBONATE_OCO_ANGLE_DEG = 130.0
 CARBONATE_CO_BOND_ANGSTROM = 1.25
-
-# Engineering-friendly screening targets for photocatalytic CO2 splitting.
-TARGET_ADSORPTION_ENERGY_EV = -0.70
-TARGET_BAND_GAP_EV = 2.40
-TARGET_ONSET_EV = 2.20
 
 
 def ensure_directories() -> None:

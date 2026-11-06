@@ -59,7 +59,8 @@ Prerequisites are added automatically: `geometry` -> `dft` -> {`tddft`, `co2rr`,
 - One invocation per run: `run_simulations` holds an exclusive lock on
   `<run>/.run_simulations.lock` until it exits. A second invocation on the same run
   (for example a `--resume --retry-failed` while the first is alive) stops with
-  "another run_simulations is using this run". `run_md` started by hand is not locked.
+  "another run_simulations is using this run". `run_md` also locks each trajectory
+  (see MD below), also when started by hand.
 - Completed methods are skipped. A method with status `failed` or `running`
   (interrupted) stops the run unless `--retry-failed` is given; otherwise use a new
   run ID.
@@ -99,6 +100,27 @@ CO₂RR, MD and NEB scripts equal the YAML (checked by tests), except that a sta
 
 - MD: equilibration frames are written separately and never used for descriptors.
   Each seed is an independent trajectory, `md/<material>/<site>/seed_<n>/`.
+- MD lock: each trajectory holds an exclusive lock on `seed_<n>/.run_md.lock` (the
+  file holds the PID of the owner). A second `run_md` on the same seed (for example
+  two shell loops started twice) stops before writing anything and names that PID.
+- MD skip: a seed whose production is complete in `md_production_frames.csv`
+  (`production_steps / log_interval + 1` frames) and recorded in `md_site_summary.csv`
+  with the same time step, friction, temperature, equilibration and production steps,
+  cutoff, k-points, DFT profile and `rng_stream` is skipped. A seed directory with an
+  incomplete production, or one made with other settings, stops with a message and is
+  recomputed only with `--overwrite` (which also reruns complete seeds). There is no
+  restart from the middle of a trajectory.
+- MD random stream (`methods.md.rng_stream`): `shared` seeds one generator with the
+  seed only, so sites with the same seed and atom ordering get the same velocities and
+  Langevin noise sequence; `per_site` (reference YAML) derives it from
+  `SeedSequence([seed, site index])`, with the fixed index `top_metal` 0, `top_oxygen`
+  1, `bridge` 2, `carbonate` 3, `tridentate` 4 (`run_md.SITE_RNG_INDEX`). A run whose
+  `config.yaml` lacks the key (e.g. `zno_ic_final`) keeps `shared`, so it stays
+  reproducible. The value is written to `md_site_summary.csv` and the frame tables.
+- OpenMP: the MD, DFT, TDDFT, CO₂RR and NEB entry points (and `relax_neb_image`) set
+  `OMP_NUM_THREADS=1` before GPAW is imported unless it is already set; the launchers
+  and the notebook set it from `execution.omp_num_threads`. `md_site_summary.csv`
+  records the value used (`omp_num_threads`).
 - NEB: the second phase climbs only when an internal image is above both endpoints;
   otherwise the plain NEB continues. Barriers <= 0.03 eV (`barrier_resolution_ev`)
   are reported as not resolved. With 6 processes each image gets 2 ranks.

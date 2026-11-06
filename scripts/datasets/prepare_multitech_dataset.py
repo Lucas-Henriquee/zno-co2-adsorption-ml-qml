@@ -941,7 +941,14 @@ def write_block_metadata(path: Path, block: dict, dataset: pd.DataFrame) -> None
 
 
 def main() -> None:
-    args = parse_args()
+    try:
+        build_datasets(parse_args())
+    except FileNotFoundError as exc:
+        # Missing inputs (e.g. no MD production tables) are reported without a traceback.
+        raise SystemExit(f"[error] {exc}") from None
+
+
+def build_datasets(args: argparse.Namespace) -> None:
     results_dir = args.results_dir.expanduser().resolve()
     output_dir = args.output_dir.expanduser().resolve()
     targets = list(dict.fromkeys(args.targets))
