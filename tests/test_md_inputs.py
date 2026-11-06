@@ -38,7 +38,7 @@ class MDInputTests(unittest.TestCase):
             write_frames(root / "md/ZnO/top_metal/seed_1", seeds=(1,))
             self.assertEqual(find_md_summaries(root), [current])
             config = {"input": {}, "methods": {"multitech": {"targets": ["md_windows"]}}}
-            self.assertEqual(collect_inputs("multitech", config, root, None), [current])
+            self.assertEqual(collect_inputs("multitech", config, root), [current])
 
             windows = load_md_windows(root, 2)
             self.assertEqual(
@@ -71,7 +71,7 @@ class MDInputTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             config = {"input": {}, "methods": {"multitech": {"targets": ["md_windows"]}}}
             with self.assertRaises(SystemExit) as raised:
-                collect_inputs("multitech", config, Path(tmp), None)
+                collect_inputs("multitech", config, Path(tmp))
             self.assertTrue(str(raised.exception.code).startswith("[error] No MD production tables"))
 
             argv = ["prepare_multitech_dataset", "--results-dir", tmp, "--output-dir", tmp,

@@ -22,11 +22,16 @@ from scripts.workflows.active_environment import active_environment
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG = PROJECT_ROOT / "configs" / "datasets" / "zno_existing_results.yaml"
-METHOD_ORDER = ("tddft", "multitech", "qml_features")
+METHOD_ORDER = ("tddft", "multitech")
 MODULES = {
     "tddft": "scripts.datasets.prepare_tddft_qml_dataset",
     "multitech": "scripts.datasets.prepare_multitech_dataset",
-    "qml_features": "scripts.datasets.export_qml_dataset",
+}
+# Retired: one row per site (3 rows, one per class) from the screening ranking, which
+# cannot be split into training and test data. Kept in scripts/legacy/datasets/.
+RETIRED_METHODS = {
+    "qml_features": "it gave one row per site (3 rows, one per class), which cannot be split "
+    "into training and test data; the script is kept in scripts/legacy/datasets/export_qml_dataset.py",
 }
 
 
@@ -37,12 +42,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "methods",
         nargs="*",
-        help="One or more methods, or 'all'. Available: tddft, multitech, qml_features.",
+        help="One or more methods, or 'all'. Available: tddft, multitech.",
     )
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--run-id", help="Safe directory name for this dataset generation run.")
     parser.add_argument("--source-results", type=Path, help="Override input.results_dir.")
-    parser.add_argument("--ranking", type=Path, help="Override the ranked candidate input file.")
     parser.add_argument(
         "--dry-run",
         action="store_true",
@@ -84,6 +88,9 @@ def normalize_methods(raw_methods: list[str]) -> list[str]:
     if not raw_methods:
         fail("Select at least one method or use 'all'.")
     normalized = [name.lower() for name in raw_methods]
+    retired = [name for name in normalized if name in RETIRED_METHODS]
+    if retired:
+        fail(f"Method '{retired[0]}' was retired: {RETIRED_METHODS[retired[0]]}.")
     if "all" in normalized:
         if len(normalized) != 1:
             fail("Use 'all' by itself, without additional method names.")
@@ -155,7 +162,6 @@ def collect_inputs(
     method: str,
     config: dict[str, Any],
     source_results: Path,
-    ranking_override: Path | None,
 ) -> list[Path]:
     input_config = require_mapping(config, "input")
     settings = method_config(config, method)
@@ -220,13 +226,6 @@ def collect_inputs(
         if block_length_fs is not None and float(block_length_fs) <= 0:
             fail("methods.multitech.block_length_fs must be positive or null.")
 
-    elif method == "qml_features":
-        if ranking_override is not None:
-            ranking = resolve_project_path(ranking_override)
-        else:
-            ranking = resolve_source_path(input_config.get("ranking"), source_results, "ranking")
-        paths.append(ranking)
-
     missing = [path for path in paths if not path.is_file()]
     if missing:
         fail("Missing dataset inputs: " + ", ".join(str(path) for path in missing))
@@ -237,7 +236,6 @@ def build_command(
     method: str,
     config: dict[str, Any],
     source_results: Path,
-    ranking_override: Path | None,
     run_dir: Path,
 ) -> list[str]:
     settings = method_config(config, method)
@@ -283,22 +281,8 @@ def build_command(
                 result.extend([option, str(float(settings[key]))])
         return result
 
-    if ranking_override is not None:
-        ranking = resolve_project_path(ranking_override)
-    else:
-        ranking = resolve_source_path(input_config.get("ranking"), source_results, "ranking")
-    result = [
-        *command,
-        "--ranking", str(ranking),
-        "--output", str(run_dir / "qml_features" / "qml_features.csv"),
-    ]
-    default_material = settings.get("default_material")
-    if default_material:
-        result.extend(["--default-material", str(default_material)])
-    features = settings.get("features")
-    if features:
-        result.extend(["--features", *[str(item) for item in features]])
-    return result
+    fail(f"Unknown method: {method}")
+    return []  # not reached
 
 
 def input_inventory(paths: list[Path]) -> list[dict[str, Any]]:
@@ -370,11 +354,11 @@ def main() -> None:
     run_dir = (output_root / run_id).resolve()
 
     inputs_by_method = {
-        method: collect_inputs(method, config, source_results, args.ranking)
+        method: collect_inputs(method, config, source_results)
         for method in selected_methods
     }
     commands = {
-        method: build_command(method, config, source_results, args.ranking, run_dir)
+        method: build_command(method, config, source_results, run_dir)
         for method in selected_methods
     }
 

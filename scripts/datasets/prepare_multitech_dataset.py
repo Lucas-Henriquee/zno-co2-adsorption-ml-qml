@@ -46,6 +46,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from scripts.analysis.co2rr_corrections import row_validity
 from scripts.common.md_inputs import find_md_summaries
 from scripts.common.project_config import EXPLORATORY_SITES, RESULTS_DIR
 from scripts.simulations.tddft.run_tddft import LEGACY_COLUMN_ALIASES
@@ -396,7 +397,12 @@ def load_co2rr_features(results_dir: Path) -> pd.DataFrame | None:
 
     Each row is read from its dG_* or dE_* columns according to ``energy_basis``;
     the features carry a neutral name (feature_co2rr_d_<step>_ev) and the basis is
-    kept in ``co2rr_energy_basis``, so a dE is never presented as a dG.
+    kept in ``co2rr_energy_basis``, so a dE is never presented as a dG. The values
+    are those of the run summary (variant a of co2rr_corrections, not the corrected
+    variant c of the paper). ``co2rr_pathway_validity`` (ok, unbound or
+    wrong_intermediate, as in co2rr_corrections.row_validity) is kept, and the
+    limiting potential is NaN when it is not ok: a site whose COOH*/CO* desorbed or
+    is not the intended intermediate has no U_L (as in Table 2).
     """
     path = results_dir / "co2rr_pathway_summary.csv"
     if not path.is_file():
@@ -411,6 +417,7 @@ def load_co2rr_features(results_dir: Path) -> pd.DataFrame | None:
 
     out = df[["material", "site"]].copy()
     out["co2rr_energy_basis"] = df["energy_basis"].astype(str)
+    out["co2rr_pathway_validity"] = [row_validity(row) for row in df.to_dict("records")]
     for step in CO2RR_STEPS:
         values = []
         for _, row in df.iterrows():
@@ -418,7 +425,8 @@ def load_co2rr_features(results_dir: Path) -> pd.DataFrame | None:
             values.append(pd.to_numeric(row.get(column), errors="coerce"))
         out[f"feature_co2rr_d_{step}_ev"] = values
     if "limiting_potential_v" in df.columns:
-        out["feature_co2rr_limiting_potential_v"] = pd.to_numeric(df["limiting_potential_v"], errors="coerce")
+        limiting = pd.to_numeric(df["limiting_potential_v"], errors="coerce")
+        out["feature_co2rr_limiting_potential_v"] = limiting.where(out["co2rr_pathway_validity"] == "ok")
     return out
 
 
@@ -975,7 +983,7 @@ def build_datasets(args: argparse.Namespace) -> None:
             output_dir / "multitech_selected_features_dataset.csv",
             SUMMARY_COLUMNS
             + [col for col in summary.columns if col.startswith("feature_co2rr_")]
-            + [col for col in ["co2rr_energy_basis", "dft_final_state"] if col in summary.columns],
+            + [col for col in ["co2rr_energy_basis", "co2rr_pathway_validity", "dft_final_state"] if col in summary.columns],
         )
 
     if "md_windows" in targets:

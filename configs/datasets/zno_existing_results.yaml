@@ -14,9 +14,6 @@ input:
   # Relative input paths are resolved below results_dir.
   tddft_summary: tddft_summary.csv
   tddft_directory: tddft
-  # Written by analyze_results.py when run with QML_ZNO_RESULTS_DIR set to the run;
-  # a workflow analysis run is passed with --ranking instead.
-  ranking: analysis/ranked_candidates.csv
 
 output:
   # Every execution receives a new directory below this path.
@@ -49,11 +46,3 @@ methods:
     # Used only for MD tables without a 'phase' column.
     equilibration_fs: 0.0
 
-  qml_features:
-    # Used only when the ranking table has no material column.
-    default_material: ZnO
-    # Ranked-table columns exported; rows with a missing value are dropped (no
-    # zero imputation). The target is the site label, not a score.
-    features:
-      - adsorption_energy_ev
-      - adsorbed_band_gap_gamma_ev

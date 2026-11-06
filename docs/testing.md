@@ -29,8 +29,7 @@ DATASET=data/generated/<dataset-run-id>/multitech/md_window_unique_dataset.csv
 ```
 
 Each command must end with `[dry-run] Validation completed`. The downstream commands
-need a finished simulation run and, for the models, a dataset run. `qml_features` (part
-of `run_datasets.sh all`) also needs `--ranking` from an executed science analysis.
+need a finished simulation run and, for the models, a dataset run.
 Nothing is simulated, trained or submitted.
 
 ## 3. Local workflow on a saved simulation run

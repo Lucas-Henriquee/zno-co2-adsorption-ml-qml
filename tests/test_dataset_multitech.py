@@ -15,7 +15,6 @@ import numpy as np
 import pandas as pd
 
 from scripts.analysis import analyze_results
-from scripts.datasets import export_qml_dataset
 from scripts.datasets import prepare_multitech_dataset as pm
 
 SITES = ("top_metal", "top_oxygen", "bridge")
@@ -91,6 +90,7 @@ def write_co2rr_summary(root: Path) -> None:
         for step in ("CO2_adsorption", "CO2_to_COOH", "COOH_to_CO", "CO_desorption", "overall"):
             row[f"{prefix}{step}_ev"] = 0.1 * (index + 1)
         rows.append(row)
+    rows[1]["pathway_validity"] = "unbound"  # top_oxygen: COOH*/CO* desorbed
     rows.append({**rows[0], "site": "top_metal", "pathway_status": "inconsistent"})
     pd.DataFrame(rows).to_csv(root / "co2rr_pathway_summary.csv", index=False)
 
@@ -152,6 +152,11 @@ class DatasetTests(unittest.TestCase):
         self.assertEqual(bridge["co2rr_energy_basis"], "electronic_energies_only")
         self.assertAlmostEqual(bridge["feature_co2rr_d_CO2_to_COOH_ev"], 0.3)
         self.assertAlmostEqual(top_oxygen["feature_co2rr_d_overall_ev"], 0.2)
+        # A site without a valid pathway keeps its steps but has no U_L (as in Table 2).
+        self.assertEqual(top_oxygen["co2rr_pathway_validity"], "unbound")
+        self.assertTrue(np.isnan(top_oxygen["feature_co2rr_limiting_potential_v"]))
+        self.assertEqual(bridge["co2rr_pathway_validity"], "ok")
+        self.assertAlmostEqual(bridge["feature_co2rr_limiting_potential_v"], -2.5)
         self.assertFalse(any("deltaG" in column for column in summary.columns))
 
     def test_md_windows_use_production_frames_and_carry_groups(self):
@@ -365,43 +370,13 @@ class ScreeningTests(unittest.TestCase):
         self.assertTrue(np.isnan(multitech.loc["top_oxygen", "tddft_co2_isolated_peak_f"]))
 
 
-class QMLExportTests(unittest.TestCase):
-    def rows(self):
-        return [
-            {"material": "ZnO", "site": "top_metal", "adsorption_energy_ev": "-0.5",
-             "adsorbed_band_gap_gamma_ev": "1.2"},
-            {"material": "ZnO", "site": "top_oxygen", "adsorption_energy_ev": "",
-             "adsorbed_band_gap_gamma_ev": "1.1"},
-            {"material": "ZnO", "site": "bridge", "adsorption_energy_ev": "-0.1",
-             "adsorbed_band_gap_gamma_ev": "nan"},
-            {"material": "ZnO", "site": "carbonate", "adsorption_energy_ev": "-1.5",
-             "adsorbed_band_gap_gamma_ev": "1.0"},
-        ]
-
-    def test_missing_values_are_dropped_not_imputed(self):
-        with patch("builtins.print"):
-            rows = export_qml_dataset.build_qml_rows(self.rows())
-        self.assertEqual([row["site"] for row in rows], ["top_metal"])
-        self.assertEqual(rows[0]["x_adsorption_energy_raw"], -0.5)
-        self.assertFalse(any(key.startswith("target_score") for key in rows[0]))
-        self.assertEqual(rows[0]["label_site_id"], 0)
-
-    def test_parse_float_never_returns_zero_for_missing(self):
-        self.assertTrue(np.isnan(export_qml_dataset.parse_float("")))
-        self.assertTrue(np.isnan(export_qml_dataset.parse_float("inf")))
-
-    def test_export_round_trip(self):
-        rows = [dict(row, adsorption_energy_ev=row["adsorption_energy_ev"] or "-0.3",
-                     adsorbed_band_gap_gamma_ev="1.3" if row["adsorbed_band_gap_gamma_ev"] == "nan"
-                     else row["adsorbed_band_gap_gamma_ev"]) for row in self.rows()]
-        with tempfile.TemporaryDirectory() as tmp, patch("builtins.print"):
-            output = Path(tmp) / "qml.csv"
-            export_qml_dataset.write_csv(output, export_qml_dataset.build_qml_rows(rows))
-            with output.open() as handle:
-                exported = list(csv.DictReader(handle))
-        self.assertEqual(len(exported), 3)
-        scaled = [float(row["x_adsorption_energy_scaled"]) for row in exported]
-        self.assertEqual((min(scaled), max(scaled)), (0.0, 1.0))
+class RetiredDatasetMethodTests(unittest.TestCase):
+    def test_qml_features_is_retired_and_not_in_all(self):
+        from scripts.workflows import run_datasets
+        self.assertEqual(run_datasets.normalize_methods(["all"]), ["tddft", "multitech"])
+        with self.assertRaises(SystemExit) as raised:
+            run_datasets.normalize_methods(["qml_features"])
+        self.assertIn("scripts/legacy/datasets/export_qml_dataset.py", str(raised.exception))
 
 
 if __name__ == "__main__":

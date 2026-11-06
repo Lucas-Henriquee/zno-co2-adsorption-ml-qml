@@ -35,7 +35,7 @@ A = `results/analyses/<run-id>/`; RUN = the simulation run.
 
 | Method | Writes into A | Needs (in RUN unless noted) |
 | --- | --- | --- |
-| `screening` | `science/screening/ranked_candidates.csv` (input of the ML datasets) | `dft_summary.csv`, `tddft_summary.csv` |
+| `screening` | `science/screening/ranked_candidates.csv` (descriptor ranking; no dataset reads it) | `dft_summary.csv`, `tddft_summary.csv` |
 | `co2rr_corrections` | `science/co2rr/`: `co2rr_corrected_summary.csv` (variants a-c), note, diagnostic pathway plot and table | `co2rr_pathway_summary.csv`, `pathways/**/energy.json` |
 | `co2_reduction` | `science/co2_reduction/` (merged DFT/TDDFT/CO₂RR tables) | `dft_summary.csv`, `tddft_summary.csv`, `co2rr_pathway_summary.csv`; `co2rr_corrections` |
 | `neb` | `science/neb/`: `neb_image_energies.csv`, `neb_barriers.csv` (read by the paper); diagnostic plots and tables of `plot_neb` | `neb/<material>/*/neb_run_summary.json` (+ `neb_final_images.traj`) |

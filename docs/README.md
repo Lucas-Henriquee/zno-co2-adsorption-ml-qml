@@ -12,4 +12,4 @@
 | [Notebooks](../notebooks/README.md) | Notebook route (secondary) |
 | [Manual testing](testing.md) | Checks before and after a campaign |
 | [Repository layout](repository_layout.md) | Directory map |
-| [Dataset reference](datasets_reference.md) | Columns and feature groups (out of date) |
+| [Dataset reference](datasets_reference.md) | Columns, labels and feature sets of the datasets |

@@ -35,8 +35,8 @@ ALLOWED_LINES = {
     # Points at the archived pipeline by its new location.
     ("docs/repository_layout.md", "scripts/legacy/workflows/run_pipeline.py"),
 }
-# Rewritten in the ML/QML review; flagged as out of date at its top.
-PENDING_ML_REVIEW = ("docs/datasets_reference.md",)
+# Pages still to be rewritten (none).
+PENDING_ML_REVIEW: tuple[str, ...] = ()
 
 
 def git_files(*paths: str) -> list[str]:

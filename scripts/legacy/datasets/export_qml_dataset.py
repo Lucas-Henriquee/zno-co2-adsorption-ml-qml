@@ -1,5 +1,9 @@
 """Export QML descriptor features from the ranked DFT table (analyze_results.py).
 
+Retired from run_datasets (former method ``qml_features``): it gives one row per site,
+3 rows for ZnO and one per class, which cannot be split into training and test data.
+Kept for provenance only.
+
 Audit A2 corrections:
 
 * Missing values are never replaced by 0.0. Rows with a missing selected feature
