@@ -437,7 +437,7 @@ def test_fig04_layout(full):
     assert ax.get_xlim() == pytest.approx((3.0, 11.4))
     assert ax.get_ylabel() == "Normalized absorption (a.u.)"
     texts = [t.get_text() for t in ax.texts]
-    assert "UV (400–200 nm)" in texts and "Vacuum UV (< 200 nm)" in texts
+    assert "UV" in texts and "Vacuum UV" in texts
     # Each main peak labelled once (not once per site), without site names.
     assert sorted(t for t in texts if t.endswith(" eV")) == ["11.00 eV", "9.52 eV"]
     legend = [t.get_text() for t in ax.get_legend().get_texts()]
@@ -446,7 +446,7 @@ def test_fig04_layout(full):
     vertical = {round(float(line.get_xdata()[0]), 3) for line in ax.get_lines() if len(set(line.get_xdata())) == 1}
     assert vertical == {round(paper_figures.HC_EV_NM / 400.0, 3), round(paper_figures.HC_EV_NM / 200.0, 3)}
     top = [child for child in ax.get_children() if child.__class__.__name__ == "SecondaryAxis"]
-    assert top and list(top[0].get_xticks()) == [400, 300, 200, 150, 120]
+    assert top and list(top[0].get_xticks()) == [400, 200, 150, 120]
 
 
 def test_fig04_window_ends_after_the_last_transition():

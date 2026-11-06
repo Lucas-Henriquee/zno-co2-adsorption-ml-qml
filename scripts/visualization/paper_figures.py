@@ -85,11 +85,13 @@ FIG06_YLABEL = "Shortest CO$_2$–surface distance (Å)"
 HC_EV_NM = 1239.841984
 FIG04_E_MIN_EV = 3.0
 FIG04_N_PEAKS = 2
-FIG04_WAVELENGTH_TICKS_NM = (400, 300, 200, 150, 120, 100, 80, 60)
+# 300 nm is left out: on a window up to ~30 eV its label overlaps the 400 nm one.
+FIG04_WAVELENGTH_TICKS_NM = (400, 200, 150, 120, 100, 80, 60)
 FIG04_REGIONS = (
-    # (label, lower eV, upper eV or None = window end, colour)
-    ("UV (400–200 nm)", HC_EV_NM / 400.0, HC_EV_NM / 200.0, "#ede7f6"),
-    ("Vacuum UV (< 200 nm)", HC_EV_NM / 200.0, None, "#eceff1"),
+    # (label, lower eV, upper eV or None = window end, colour). The wavelength limits are
+    # read on the top axis; a longer UV label would spill over the y-axis tick labels.
+    ("UV", HC_EV_NM / 400.0, HC_EV_NM / 200.0, "#ede7f6"),
+    ("Vacuum UV", HC_EV_NM / 200.0, None, "#eceff1"),
 )
 # fig05 legend text of a site that has no U_L.
 CO2RR_INVALID_TEXT = {
@@ -360,8 +362,8 @@ def plot_fig04(data: pd.DataFrame):
     top = ax.secondary_xaxis("top", functions=(energy_to_nm, energy_to_nm))
     top.set_xticks([nm for nm in FIG04_WAVELENGTH_TICKS_NM if e_min <= HC_EV_NM / nm <= e_max])
     top.set_xlabel("Wavelength (nm)")
-    # Legend in the UV region (left, centre) so it covers neither the curves nor the labels.
-    ax.legend(loc="center left", bbox_to_anchor=(0.0, 0.5), fontsize=7.0, handlelength=1.5)
+    # Legend on the right, below the region label: beyond the main peaks the window is empty.
+    ax.legend(loc="center right", bbox_to_anchor=(1.0, 0.5), fontsize=7.0, handlelength=1.5)
     return fig
 
 
