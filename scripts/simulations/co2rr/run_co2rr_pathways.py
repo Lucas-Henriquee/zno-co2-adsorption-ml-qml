@@ -1398,6 +1398,17 @@ def run_pathways(args: argparse.Namespace) -> list[tuple[str, str]]:
     dft_rows = {(row["material"], row["site"]): row for row in read_csv_rows(RESULTS_DIR / "dft_summary.csv")}
     if not dft_rows:
         raise SystemExit("Missing dft_summary.csv rows. Run run_dft.py first.")
+    # The pathway calculators are plain PBE; mixing them with dispersion-corrected
+    # E(*) and E(CO2*) from dft_summary.csv would give wrong step energies.
+    with_dispersion = sorted(
+        f"{key[0]}|{key[1]}" for key, row in dft_rows.items()
+        if run_dft.dispersion_name(row.get("dispersion")) != run_dft.DISPERSION_NONE
+    )
+    if with_dispersion:
+        raise SystemExit(
+            f"dft_summary.csv rows with a dispersion correction ({with_dispersion}); "
+            "the CO2RR pathways support PBE without dispersion only."
+        )
 
     # Rows of other cases are kept only if they use the current schema; requested cases are recomputed.
     rows_by_key: dict[tuple[str, str], dict[str, float | str]] = {

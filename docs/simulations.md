@@ -132,6 +132,31 @@ CO₂RR, MD and NEB scripts equal the YAML (checked by tests), except that a sta
 A finished process does not prove optimizer or SCF convergence; check the method logs
 before using the outputs.
 
+## Dispersion correction (PBE-D3)
+
+`methods.dft.dispersion` is `none` (reference YAML) or `d3bj`: Grimme D3 with
+Becke-Johnson damping and PBE parameters, from simple-dftd3 (`dftd3-python` in
+`environments/simulation.yaml`). The D3 energy and forces are added to the PBE ones
+(`ase.calculators.mixing.SumCalculator`); the PBE density is unchanged, so the band
+gaps and `.gpw` files are those of PBE.
+
+- Every DFT term uses it: clean slab, CO₂ reference and adsorbed sites, so E_ads is a
+  PBE-D3 difference. `dft_summary.csv` records `dispersion`,
+  `clean_dispersion_energy_ev` and `adsorbed_dispersion_energy_ev`; rows of another
+  dispersion are not merged into a run.
+- NEB and `relax_neb_image` read the dispersion of the endpoints from
+  `dft_summary.csv` and stop when the two endpoints differ.
+- CO₂RR and MD support PBE without dispersion only and stop on a `d3bj` row.
+- The lattice constant and the initial geometries are those of the PBE runs.
+
+`configs/simulations/zno_d3_stage1.yaml` (branch `explore/pbe-d3-sites`) equals the
+reference YAML except for `dispersion: d3bj`. Run only the NEB, which pulls in geometry
+and DFT:
+
+```bash
+./run_simulations.sh neb --config configs/simulations/zno_d3_stage1.yaml --run-id zno_d3_stage1
+```
+
 ## Optional: relax a NEB image
 
 When a NEB band has an internal image below both endpoints (`endpoint_not_minimum`),

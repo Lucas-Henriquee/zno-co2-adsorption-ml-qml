@@ -308,6 +308,13 @@ def read_dft_row(results_dir: Path, material: str, site: str) -> dict:
     with path.open("r", newline="", encoding="utf-8") as handle:
         for row in csv.DictReader(handle):
             if row.get("material") == material and row.get("site") == site:
+                dispersion = str(row.get("dispersion", "") or "none").strip().lower()
+                if dispersion not in ("none", "nan"):
+                    # The MD calculator is plain PBE; a D3 geometry would start out of equilibrium.
+                    raise RuntimeError(
+                        f"{material} | {site} was relaxed with dispersion {dispersion!r}; "
+                        "the MD supports PBE without dispersion only."
+                    )
                 return row
     raise RuntimeError(f"No row for {material} | {site} in {path}.")
 

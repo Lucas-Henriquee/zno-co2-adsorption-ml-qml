@@ -325,6 +325,10 @@ def build_commands(
         command += ["--relax-extra-blocks", str(relax_extra_blocks)]
         if settings.get("scf_force_convergence") is not None:
             command += ["--scf-force-convergence", str(positive_float(settings, "scf_force_convergence", method))]
+        dispersion = str(settings.get("dispersion") or "none").strip().lower()
+        if dispersion not in ("none", "d3bj"):
+            fail("methods.dft.dispersion must be none or d3bj.")
+        command += ["--dispersion", dispersion]
         return [command]
 
     if method == "tddft":

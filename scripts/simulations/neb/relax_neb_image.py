@@ -129,6 +129,11 @@ def endpoint_rows(results_dir: Path, material: str, initial: str, final: str) ->
     profiles = {site: row.get("dft_profile", "") for site, row in found.items()}
     if len(set(profiles.values())) != 1:
         raise SystemExit(f"[relax-image] endpoints use different DFT profiles: {profiles}")
+    from scripts.simulations.dft import run_dft
+
+    dispersion = {site: run_dft.dispersion_name(row.get("dispersion")) for site, row in found.items()}
+    if len(set(dispersion.values())) != 1:
+        raise SystemExit(f"[relax-image] endpoints use different dispersion corrections: {dispersion}")
     return found
 
 
@@ -247,7 +252,9 @@ def relax_image(args: argparse.Namespace, world=None) -> dict:
     if neb_summary.get("dft_profile") and neb_summary["dft_profile"] != profile:
         raise SystemExit(f"[relax-image] NEB profile {neb_summary['dft_profile']!r} differs from the "
                          f"dft_summary profile {profile!r}")
-    calculator = run_neb.calculator_settings(profile, settings["ecut"], settings["kpts"])
+    calculator = run_neb.calculator_settings(
+        profile, settings["ecut"], settings["kpts"], run_dft.dispersion_name(rows[initial].get("dispersion"))
+    )
     calculator["scf_force_convergence"] = settings["scf_force_convergence"]
 
     start = band[args.image]
@@ -263,7 +270,7 @@ def relax_image(args: argparse.Namespace, world=None) -> dict:
             paths["json"].unlink()  # never leave the result of an earlier run next to a new one
     world.barrier()
 
-    atoms.calc = run_dft.build_calculator(
+    atoms.calc = run_dft.with_dispersion(run_dft.build_calculator(
         ecut=calculator["ecut"],
         kpts=tuple(calculator["kpts"]),
         txt_file=paths["txt"],
@@ -272,7 +279,7 @@ def relax_image(args: argparse.Namespace, world=None) -> dict:
         maxiter=calculator["maxiter"],
         mixer=tuple(calculator["mixer"]) if calculator["mixer"] is not None else None,
         scf_force_convergence=calculator["scf_force_convergence"],
-    )
+    ), calculator["dispersion"])
     # ASE optimizers write the log and trajectory on rank 0 only.
     optimizer = BFGS(atoms, logfile=str(paths["log"]), trajectory=str(paths["traj"]))
     converged = bool(optimizer.run(fmax=fmax, steps=args.steps))

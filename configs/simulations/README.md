@@ -1,7 +1,9 @@
 # Simulation configuration
 
 `zno_production.yaml` is the reference configuration of the ZnO runs: materials, sites,
-MPI settings and output root once, then one section per method. Values and resume
+MPI settings and output root once, then one section per method. `zno_d3_stage1.yaml`
+is the same with `methods.dft.dispersion: d3bj`, for DFT and NEB only (PBE-D3
+exploration). Values and resume
 rules: [docs/simulations.md](../../docs/simulations.md).
 
 ```bash

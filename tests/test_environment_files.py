@@ -27,6 +27,7 @@ IMPORT_TO_PACKAGE = {
     "qiskit_aer": "qiskit-aer",
     "qiskit_machine_learning": "qiskit-machine-learning",
     "qiskit_ibm_runtime": "qiskit-ibm-runtime",
+    "dftd3": "dftd3-python",
 }
 # Imported directly but installed as a dependency of a listed package.
 TRANSITIVE = {
@@ -34,7 +35,9 @@ TRANSITIVE = {
     "packaging": "matplotlib",  # used by this test only
 }
 # Needs GPAW, which pip cannot provide with MPI: only the simulation environment.
-GPAW_ONLY = {"gpaw"}
+# Simulation environment only: gpaw, and dftd3 (simple-dftd3, imported by run_dft
+# only for methods.dft.dispersion: d3bj).
+GPAW_ONLY = {"gpaw", "dftd3"}
 # Optional, not in any environment: export_pymol renders fig01 with PyMOL
 # (pymol-open-source) when importable, else with its ASE/matplotlib fallback.
 OPTIONAL = {"pymol", "pymol2"}

@@ -100,6 +100,13 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Optional GPAW SCF force criterion (eV/Ang); default: GPAW's own criteria.",
     )
+    parser.add_argument(
+        "--dispersion",
+        choices=DISPERSION_CHOICES,
+        default=DISPERSION_NONE,
+        help="Dispersion correction added to PBE: none (default) or d3bj (Grimme D3, "
+        "Becke-Johnson damping, through the simple-dftd3 package).",
+    )
     return parser.parse_args()
 
 
@@ -128,6 +135,55 @@ CEO2_EXTRA_PROFILES = (
     {"name": "ce_lcao", "mode": "lcao", "smearing": 0.30, "maxiter": 500, "mixer": (0.02, 8, 180)},
     {"name": "ce_fd", "mode": "fd", "smearing": 0.35, "maxiter": 600, "mixer": (0.01, 12, 240)},
 )
+
+
+# Dispersion correction added to the PBE energy and forces. "d3bj" is Grimme's D3 with
+# Becke-Johnson damping (PBE parameters) from simple-dftd3 (conda-forge: dftd3-python);
+# the PBE density is unchanged, so GPAW-only operations (band gap, .gpw files) keep using
+# the GPAW calculator.
+DISPERSION_NONE = "none"
+DISPERSION_D3BJ = "d3bj"
+DISPERSION_CHOICES = (DISPERSION_NONE, DISPERSION_D3BJ)
+
+
+def dispersion_name(value) -> str:
+    """Dispersion of a dft_summary row or setting; blank or missing (older runs) = none."""
+    text = str(value or "").strip().lower()
+    return text if text and text != "nan" else DISPERSION_NONE
+
+
+def dispersion_calculator(dispersion: str):
+    """The calculator of the dispersion term alone, or None for 'none'."""
+    dispersion = dispersion_name(dispersion)
+    if dispersion == DISPERSION_NONE:
+        return None
+    if dispersion != DISPERSION_D3BJ:
+        raise ValueError(f"Unknown dispersion {dispersion!r}; use one of {DISPERSION_CHOICES}.")
+    try:
+        from dftd3.ase import DFTD3
+    except ImportError as exc:
+        raise SystemExit(
+            "dispersion d3bj needs the simple-dftd3 Python API (module dftd3.ase): "
+            "conda install -c conda-forge dftd3-python"
+        ) from exc
+    return DFTD3(method="PBE", damping="d3bj")
+
+
+def with_dispersion(dft_calc, dispersion: str):
+    """dft_calc itself for 'none'; otherwise the sum of dft_calc and the dispersion term."""
+    extra = dispersion_calculator(dispersion)
+    if extra is None:
+        return dft_calc
+    from ase.calculators.mixing import SumCalculator
+
+    return SumCalculator([dft_calc, extra])
+
+
+def dispersion_energy(atoms, dft_calc) -> float:
+    """Total minus the PBE energy of the last calculation (0 without dispersion)."""
+    if atoms.calc is dft_calc:
+        return 0.0
+    return float(atoms.get_potential_energy()) - float(dft_calc.get_potential_energy(atoms))
 
 
 def build_calculator(
@@ -214,6 +270,7 @@ def optimize_structure(
     profiles=None,
     relax_extra_blocks: int = 1,
     scf_force_convergence: float | None = None,
+    dispersion: str = DISPERSION_NONE,
 ) -> tuple[float, float, object, str]:
     """Relax with the first SCF profile that works.
 
@@ -245,7 +302,7 @@ def optimize_structure(
             mixer=profile["mixer"],
             scf_force_convergence=scf_force_convergence,
         )
-        trial.calc = calc
+        trial.calc = with_dispersion(calc, dispersion)
 
         dyn = BFGS(
             trial,
@@ -278,6 +335,7 @@ def optimize_structure(
             trial.info["fmax_initial"] = fmax_initial
             trial.info["fmax_final"] = fmax_final
             energy = float(trial.get_potential_energy())
+            trial.info["dispersion_energy"] = dispersion_energy(trial, calc)
             calc.write(str(output_dir / f"{label}.gpw"), mode="all")
             write(output_dir / f"{label}_optimized.xyz", trial)
             write(output_dir / f"{label}_optimized.cif", trial)
@@ -347,6 +405,7 @@ def co2_reference_energy(
     steps: int,
     profile: dict[str, object],
     scf_force_convergence: float | None = None,
+    dispersion: str = DISPERSION_NONE,
 ) -> float:
     from ase import Atoms
     from ase.io import write
@@ -369,7 +428,7 @@ def co2_reference_energy(
         mixer=tuple(profile["mixer"]),
         scf_force_convergence=scf_force_convergence,
     )
-    co2.calc = calc
+    co2.calc = with_dispersion(calc, dispersion)
     dyn = BFGS(
         co2,
         trajectory=str(output_dir / f"co2_ref.{profile_name}.traj"),
@@ -392,7 +451,9 @@ def co2_reference_energy(
             json.dump(
                 {
                     "profile": profile_name,
+                    "dispersion": dispersion_name(dispersion),
                     "co2_reference_energy_ev": energy,
+                    "co2_dispersion_energy_ev": dispersion_energy(co2, calc),
                 },
                 handle,
                 indent=2,
@@ -508,11 +569,18 @@ def kpts_label(kpts: Iterable[int]) -> str:
     return "x".join(str(int(value)) for value in kpts)
 
 
-def settings_match(row: dict[str, float | str], ecut: float, kpts: str, n_slab_atoms: int | None) -> bool:
-    """True if an existing row was computed with the same cutoff, k-mesh and slab size."""
+def settings_match(
+    row: dict[str, float | str],
+    ecut: float,
+    kpts: str,
+    n_slab_atoms: int | None,
+    dispersion: str = DISPERSION_NONE,
+) -> bool:
+    """True if an existing row was computed with the same cutoff, k-mesh, slab size and dispersion."""
     try:
         return (
-            math.isclose(float(row["ecut_ev"]), float(ecut))
+            dispersion_name(row.get("dispersion")) == dispersion_name(dispersion)
+            and math.isclose(float(row["ecut_ev"]), float(ecut))
             and str(row["kpts"]) == kpts
             and n_slab_atoms is not None
             and int(float(row["n_slab_atoms"])) == n_slab_atoms
@@ -526,20 +594,22 @@ def compatible_existing_rows(
     ecut: float,
     kpts: str,
     slab_atoms_by_material: dict[str, int],
+    dispersion: str = DISPERSION_NONE,
 ) -> list[dict[str, float | str]]:
     """Keep only rows with the current physics settings; report the dropped ones."""
     kept = []
     dropped = []
     for row in rows:
         n_slab = slab_atoms_by_material.get(str(row.get("material", "")))
-        if settings_match(row, ecut, kpts, n_slab):
+        if settings_match(row, ecut, kpts, n_slab, dispersion):
             kept.append(row)
         else:
             dropped.append(row_key(row))
     if dropped:
         print0(
             f"[dft] warning: dropped {len(dropped)} row(s) from the existing summary computed "
-            f"with other settings than ecut={ecut} eV, kpts={kpts} or the current slab: {dropped}"
+            f"with other settings than ecut={ecut} eV, kpts={kpts}, dispersion={dispersion_name(dispersion)} "
+            f"or the current slab: {dropped}"
         )
     return kept
 
@@ -613,6 +683,10 @@ def run_dft_workflow(args: argparse.Namespace) -> None:
     # Absent from Namespaces built by older callers; defaults match parse_args.
     relax_extra_blocks = int(getattr(args, "relax_extra_blocks", 1))
     scf_force_convergence = getattr(args, "scf_force_convergence", None)
+    dispersion = dispersion_name(getattr(args, "dispersion", DISPERSION_NONE))
+    if dispersion not in DISPERSION_CHOICES:
+        raise SystemExit(f"Unknown dispersion {dispersion!r}; use one of {DISPERSION_CHOICES}.")
+    dispersion_calculator(dispersion)  # fail before any SCF when simple-dftd3 is missing
     n_slab_by_material: dict[str, int] = {}
 
     reference_dir = DFT_RESULTS_DIR / "_reference"
@@ -635,6 +709,7 @@ def run_dft_workflow(args: argparse.Namespace) -> None:
                 steps=args.steps,
                 profile=profile,
                 scf_force_convergence=scf_force_convergence,
+                dispersion=dispersion,
             )
         co2_reference_cache[profile_name] = energy
         print0(f"[dft] CO2 gas reference energy ({profile_name}) = {energy:.6f} eV")
@@ -650,6 +725,7 @@ def run_dft_workflow(args: argparse.Namespace) -> None:
             ecut=args.ecut,
             kpts=kpts_label(kpts),
             slab_atoms_by_material=slab_atom_counts(existing_materials & set(MATERIALS)),
+            dispersion=dispersion,
         )
     }
 
@@ -660,6 +736,7 @@ def run_dft_workflow(args: argparse.Namespace) -> None:
             "ecut_ev": float(args.ecut),
             "kpts": kpts_label(kpts),
             "n_slab_atoms": n_slab_by_material.get(material, ""),
+            "dispersion": dispersion,
         }
 
     def flush_summary() -> None:
@@ -690,6 +767,7 @@ def run_dft_workflow(args: argparse.Namespace) -> None:
                     profiles=profiles_for_material,
                     relax_extra_blocks=relax_extra_blocks,
                     scf_force_convergence=scf_force_convergence,
+                    dispersion=dispersion,
                 )
             print0(
                 f"[dft] {material} clean slab energy = {clean_energy:.6f} eV "
@@ -735,6 +813,7 @@ def run_dft_workflow(args: argparse.Namespace) -> None:
                             profiles=(profile_catalog[profile_name],),
                             relax_extra_blocks=relax_extra_blocks,
                             scf_force_convergence=scf_force_convergence,
+                            dispersion=dispersion,
                         )
                     check_clean_slab_energy(energy, material, profile_name)
                 except Exception as exc:
@@ -788,6 +867,7 @@ def run_dft_workflow(args: argparse.Namespace) -> None:
                         profiles=ads_profiles,
                         relax_extra_blocks=relax_extra_blocks,
                         scf_force_convergence=scf_force_convergence,
+                        dispersion=dispersion,
                     )
 
                 slab_energy, slab_gap, slab_atoms_opt = clean_for_profile(ads_profile)
@@ -826,6 +906,8 @@ def run_dft_workflow(args: argparse.Namespace) -> None:
                         "adsorbed_relax_restarts": ads_atoms_opt.info.get("relax_restarts", 0),
                         "adsorbed_fmax_initial_ev_per_ang": ads_atoms_opt.info.get("fmax_initial", float("nan")),
                         "adsorbed_fmax_final_ev_per_ang": ads_atoms_opt.info["fmax_final"],
+                        "clean_dispersion_energy_ev": slab_atoms_opt.info.get("dispersion_energy", 0.0),
+                        "adsorbed_dispersion_energy_ev": ads_atoms_opt.info.get("dispersion_energy", 0.0),
                         **geometry_metrics,
                         "final_state": final_state,
                         "warnings": warnings,

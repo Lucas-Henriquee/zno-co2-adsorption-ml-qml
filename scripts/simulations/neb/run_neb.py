@@ -504,7 +504,7 @@ def adsorbate_displacement(initial, final, adsorbate_atoms: int = ADSORBATE_ATOM
 
 
 # CALCULATORS
-def calculator_settings(profile_name: str, ecut: float, kpts) -> dict:
+def calculator_settings(profile_name: str, ecut: float, kpts, dispersion: str = "none") -> dict:
     catalog = {
         str(profile["name"]): profile
         for profile in (run_dft.OPTIMIZATION_PROFILES + run_dft.CEO2_EXTRA_PROFILES)
@@ -525,6 +525,7 @@ def calculator_settings(profile_name: str, ecut: float, kpts) -> dict:
         "smearing": float(profile["smearing"]),
         "maxiter": int(profile["maxiter"]),
         "mixer": list(mixer) if mixer is not None else None,
+        "dispersion": run_dft.dispersion_name(dispersion),
     }
 
 
@@ -552,11 +553,12 @@ def make_calculator(settings: dict, txt_file: Path, communicator=None):
         "mixer": tuple(settings["mixer"]) if settings["mixer"] is not None else None,
     }
 
+    dispersion = settings.get("dispersion", run_dft.DISPERSION_NONE)
     if communicator is None:
-        return run_dft.build_calculator(**kwargs)
+        return run_dft.with_dispersion(run_dft.build_calculator(**kwargs), dispersion)
 
     with _gpaw_communicator(communicator):
-        return run_dft.build_calculator(**kwargs)
+        return run_dft.with_dispersion(run_dft.build_calculator(**kwargs), dispersion)
 
 
 def endpoint_single_point(atoms, settings: dict, txt_file: Path) -> tuple[float, float]:
@@ -878,6 +880,16 @@ def _run_pair(record: dict, *, material: str, initial_site: str, final_site: str
         )
     record["dft_profile"] = profile_initial
 
+    # The images use the dispersion of the DFT run; mixed endpoints are not comparable.
+    dispersion = {site: run_dft.dispersion_name(rows[site].get("dispersion")) for site in rows}
+    if len(set(dispersion.values())) != 1:
+        raise PairAborted(
+            STATUS_PROFILE_MISMATCH,
+            f"Endpoints were optimized with different dispersion corrections {dispersion}; "
+            f"their energies are not comparable.",
+        )
+    record["dispersion"] = dispersion[initial_site]
+
     paths = {site: dft_structure_path(results_dir, material, site) for site in (initial_site, final_site)}
     for site, path in paths.items():
         if not path.exists():
@@ -904,7 +916,7 @@ def _run_pair(record: dict, *, material: str, initial_site: str, final_site: str
             f"(<= {MIN_ENDPOINT_DISPLACEMENT_ANG} A); both relaxed to the same minimum.",
         )
 
-    settings = calculator_settings(profile_initial, args.ecut, args.kpts)
+    settings = calculator_settings(profile_initial, args.ecut, args.kpts, record["dispersion"])
     record["calculator"] = settings
 
     endpoints = {}

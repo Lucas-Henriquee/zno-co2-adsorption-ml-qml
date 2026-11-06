@@ -28,6 +28,8 @@ dependencies:
   - fftw=3.3.*=mpi_openmpi_*
   - elpa
   - libvdwxc
+  # Grimme D3 for methods.dft.dispersion: d3bj (simple-dftd3 and its Python API dftd3.ase).
+  - dftd3-python=1.5.*
 
   # Configurations, tables and figures.
   - pyyaml=6.0.*
