@@ -3,7 +3,9 @@
 `zno_production.yaml` is the reference configuration of the ZnO runs: materials, sites,
 MPI settings and output root once, then one section per method. `zno_d3_stage1.yaml`
 is the same with `methods.dft.dispersion: d3bj`, for DFT and NEB only (PBE-D3
-exploration). Values and resume
+exploration). `zno_md_100k.yaml` and `zno_md_300k_extra.yaml` are short AIMD runs
+(500 + 500 steps) for the site-memory analysis: 100 K with seeds 1234, 2345, 3456, and
+300 K with the new seeds 4567, 5678, 6789. Values and resume
 rules: [docs/simulations.md](../../docs/simulations.md).
 
 ```bash

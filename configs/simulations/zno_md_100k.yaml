@@ -1,0 +1,156 @@
+schema_version: 1
+
+project:
+  name: zno-co2-md-100k
+  description: >
+    Short AIMD at 100 K for the site-memory analysis (branch feat/site-memory): the
+    production reference with temperature_kelvin 100, 500 equilibration + 500
+    production steps (1 ps from the DFT geometry) and seeds 1234, 2345, 3456. Run only
+    md (it pulls in geometry and dft); the other sections are not used.
+
+selection:
+  materials:
+    - ZnO
+  sites:
+    - top_metal
+    - top_oxygen
+    - bridge
+
+output:
+  root: results/simulations
+
+execution:
+  environment: qml-zno-simulation
+  omp_num_threads: 1
+  mpi:
+    enabled: true
+    # 6 ranks: the 2x1 cell with k 2x3x1 and symmetry off has 6 k-points (one per rank),
+    # and the lab PC has 6 performance cores.
+    processes: 6
+    launcher: mpiexec
+    extra_args:
+      - --mca
+      - btl
+      - self,vader
+    methods:
+      - dft
+      - tddft
+      - co2rr
+      - md
+      - neb
+
+methods:
+  geometry: {}
+
+  dft:
+    fmax_ev_per_angstrom: 0.05
+    max_steps: 180
+    ecut_ev: 500.0
+    kpoints: [2, 3, 1]
+    co2_box_vacuum_angstrom: 8.0
+    # Extra blocks of max_steps BFGS steps, continued from the last geometry, before a
+    # relaxation that hit the step limit is declared failed.
+    relax_extra_blocks: 1
+    # Optional SCF force criterion in eV/Ang (e.g. 0.01); null keeps GPAW's defaults.
+    scf_force_convergence: null
+
+  # LrTDDFT spectrum of the CO2 molecule in its adsorbed (DFT-optimised)
+  # geometry, isolated in a non-periodic box WITHOUT the slab (fd mode, Gamma).
+  # It is not the optical response of ZnO-CO2; do not compare it with a
+  # photocatalyst onset target. All energies are written in eV.
+  tddft:
+    # Transitions written to transitions.csv: 0 = all computed transitions (Fig. 4 is drawn
+    # up to the last one; the descriptors and the TRK sum always use all of them).
+    max_transitions: 0
+    # First bright excitation = lowest transition with oscillator strength f >= threshold.
+    oscillator_strength_threshold: 0.001
+    grid_spacing_angstrom: 0.25
+    box_size_angstrom: 18.0
+    smearing_width_ev: 0.10
+    # The run uses nbands = max(68, converged + 8) = 76 bands: 68 converged (8 occupied
+    # + 60 unoccupied) plus 8 unconverged buffer bands, which jend keeps out of the basis.
+    nbands: 68
+    converged_bands: 68
+    # Maximal Kohn-Sham transition energy in the LrTDDFT basis (also limited by jend).
+    energy_window_ev: 30.0
+
+  co2rr:
+    fmax_ev_per_angstrom: 0.05
+    max_steps: 260
+    ecut_ev: 500.0
+    kpoints: [2, 3, 1]
+    molecule_box_vacuum_angstrom: 8.0
+    # Thermochemistry (read by run_co2rr_pathways.py from this file; CLI flags override).
+    # vibrations: false gives electronic energies only and dE_* columns, never dG_*.
+    vibrations: true
+    vibration_displacement_angstrom: 0.01
+    temperature_kelvin: 298.15
+    electrode_potential_v_rhe: 0.0
+    # H2O at 0.035 bar is in equilibrium with liquid water at 298 K (Peterson et al. 2010).
+    partial_pressures_bar:
+      CO2: 1.0
+      CO: 1.0
+      H2: 1.0
+      H2O: 0.035
+    # Additive corrections (eV) to G of gas-phase CO2 and CO for the PBE error, applied
+    # during the run. Kept at zero here: the PBE gas-phase corrections (CO2 +0.19 eV,
+    # CO -0.24 eV; Granda-Marulanda et al., ACS Catal. 10, 6900 (2020)) are applied in
+    # post-processing by scripts/analysis/co2rr_corrections.py (variant c, the default
+    # downstream), which checks the corrected overall CO2 + 2(H+ + e-) -> CO + H2O
+    # against the experimental value (+0.20/+0.21 eV, liquid-water reference).
+    gas_corrections_ev:
+      CO2: 0.0
+      CO: 0.0
+    # O* is not part of the CO2 -> CO pathway; when true it is computed and reported
+    # only as the separate quantity "O* formation from H2O".
+    o_star_reference: false
+
+  md:
+    # The MD uses the GPAW profile (smearing, mixer, maxiter) of the DFT run for each
+    # site (dft_summary.csv: dft_profile); ecut_ev and kpoints must equal methods.dft.
+    temperature_kelvin: 100.0
+    # Deprecated alias of production_steps, kept for the workflow command line.
+    steps: 500
+    equilibration_steps: 500  # 0.5 ps at 1 fs (5 x the thermostat time); not used for descriptors
+    production_steps: 500
+    timestep_fs: 1.0
+    friction_per_fs: 0.01  # Langevin friction in fs^-1 (tau = 100 fs)
+    log_interval: 20
+    seed: 1234
+    # One independent trajectory per seed (md/<material>/<site>/seed_<n>); the grouped
+    # ML split needs >= 2 per site and grouped CV inside training needs >= 3.
+    seeds: [1234, 2345, 3456]
+    # per_site: generator from SeedSequence([seed, site index]), so sites with the same
+    # seed and atom ordering do not share velocities and Langevin noise. A config.yaml
+    # without this key (older runs) uses "shared" (seed only), as those runs did.
+    rng_stream: per_site
+    nve_test_steps: 200  # only with run_md.py --nve-test
+    nve_test_timesteps_fs: [0.5, 1.0]
+    ecut_ev: 500.0
+    kpoints: [2, 3, 1]
+
+  neb:
+    internal_images: 3
+    # Plain-NEB phase. The second phase (to fmax_ci) is a climbing image only when an
+    # internal image is above both endpoints; otherwise the plain NEB continues.
+    fmax_ev_per_angstrom: 0.08
+    fmax_ci_ev_per_angstrom: 0.05
+    # Total step budget; climb_start_fraction of it goes to the plain phase.
+    max_steps: 300
+    ecut_ev: 500.0
+    kpoints: [2, 3, 1]
+    interpolation: idpp
+    optimizer: FIRE
+    climb: true
+    climb_start_fraction: 0.30
+    parallel_images: true
+    # Barriers at or below this value (SCF/fmax noise, ~kT at 300 K) are reported as not resolved.
+    barrier_resolution_ev: 0.03
+    # Endpoint single points must reproduce the DFT run within these tolerances.
+    endpoint_energy_tol_ev: 0.02
+    endpoint_force_factor: 1.5
+    # Elementary hops only: on the 2x1 cell top_metal, bridge and top_oxygen are
+    # collinear along y, so top_metal -> top_oxygen would pass over bridge.
+    pairs:
+      - [top_metal, bridge]
+      - [bridge, top_oxygen]
