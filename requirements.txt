@@ -6,5 +6,7 @@ scipy>=1.11
 pandas>=2.1,<3
 matplotlib>=3.8,<4
 PyYAML>=6.0,<7
+# Site-memory analysis (scripts/analysis/site_memory.py: SVM, logistic, nearest centroid).
+scikit-learn>=1.3,<1.7
 # >= 3.23 for ase.mep and the MD APIs; < 3.30 until NEB.energies is re-verified.
 ase>=3.23,<3.30

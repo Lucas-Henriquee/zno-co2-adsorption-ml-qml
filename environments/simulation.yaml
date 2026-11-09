@@ -42,6 +42,6 @@ dependencies:
   - nbclient=0.10.*
   - ipykernel
 
-  # Test suite (tests/ imports pytest and scikit-learn).
+  # Test suite (tests/ imports pytest and scikit-learn) and the site-memory analysis.
   - pytest>=8
   - scikit-learn=1.6.*

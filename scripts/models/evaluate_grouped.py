@@ -102,7 +102,7 @@ except ModuleNotFoundError:  # executed as a file from outside the project root
 
 OUTER_SCHEMES = ("one_per_class", "loto")
 ALL_MODELS = ("majority", "nearest_centroid", "logistic", "linear_svm", "svm_rbf", "qsvm")
-BUILTIN_KERNELS = ("statevector", "product_angle")
+BUILTIN_KERNELS = ("statevector", "zz_exact", "product_angle")
 DEFAULT_FIXED_PARAMS = {
     "logistic": {"C": 1.0},
     "linear_svm": {"C": 1.0},
@@ -171,6 +171,14 @@ def resolve_kernel(name: str, n_features: int, n_qubits: int = 0, reps: int = 1,
     """
     if name == "statevector":
         return statevector_kernel_factory(n_features, n_qubits, reps, entanglement)
+    if name == "zz_exact":
+        # The same ZZ-feature-map fidelity kernel, evaluated with numpy (no qiskit); one
+        # qubit per feature only.
+        if n_qubits not in (0, n_features):
+            raise ValueError("zz_exact uses one qubit per feature; use statevector for other qubit counts.")
+        from scripts.models.qml.zz_kernel import zz_kernel_factory
+
+        return zz_kernel_factory(reps, entanglement)
     if name == "product_angle":
         return product_angle_kernel
     if ":" in name:
@@ -1032,7 +1040,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help='JSON overriding fixed values, e.g. \'{"qsvm": {"C": 10}}\'.')
     parser.add_argument("--class-weight", default="balanced", choices=["balanced", "none"])
     parser.add_argument("--qsvm-kernel", default="statevector",
-                        help="statevector (qiskit ZZ feature map, as qsvm_baseline.py), product_angle "
+                        help="statevector (qiskit ZZ feature map, as qsvm_baseline.py), zz_exact (the "
+                             "same kernel with numpy, one qubit per feature, no qiskit), product_angle "
                              "(classically computable test kernel) or module:callable.")
     parser.add_argument("--qsvm-qubits", type=int, default=0)
     parser.add_argument("--qsvm-reps", type=int, default=1)

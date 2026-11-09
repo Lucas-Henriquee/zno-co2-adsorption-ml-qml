@@ -206,7 +206,8 @@ class EnvironmentFilesTest(unittest.TestCase):
                 missing = sorted(m for m in used if package_for(m) not in provided)
                 self.assertEqual(missing, [])
         provided = set(requirement_packages("requirements-dev.txt"))
-        test_imports = set(imports_in("tests")) - GPAW_ONLY - {"qiskit"}
+        # qiskit imports in tests are optional (skipped or guarded when absent).
+        test_imports = set(imports_in("tests")) - GPAW_ONLY - {"qiskit", "qiskit_machine_learning"}
         self.assertEqual(sorted(m for m in test_imports if package_for(m) not in provided), [])
 
     def test_no_gpaw_in_pip_requirements(self):
