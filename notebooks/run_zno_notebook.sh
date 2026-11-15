@@ -19,10 +19,15 @@ NB_TIMEOUT="${NB_TIMEOUT:--1}"
 select_manager
 cd "${SCRIPT_DIR}"
 
-# The analysis notebook only reads saved results; the simulation notebook needs GPAW.
-# Environment: QML_ZNO_ANALYSIS_ENV, then QML_ZNO_SIM_ENV for it (the simulation
-# environment also has the analysis packages); QML_ZNO_SIM_ENV for the simulation notebook.
-if [[ "${INPUT_NOTEBOOK}" == *analysis* ]]; then
+# The analysis notebook only reads saved results; the simulation notebook needs GPAW; the
+# models notebook needs scikit-learn and Qiskit. Environment: QML_ZNO_MODEL_ENV (default
+# qml-zno-modeling) for the models notebook; QML_ZNO_ANALYSIS_ENV, then QML_ZNO_SIM_ENV for
+# the analysis notebook (the simulation environment also has the analysis packages);
+# QML_ZNO_SIM_ENV for the simulation notebook.
+if [[ "${INPUT_NOTEBOOK}" == *models* ]]; then
+  ENVIRONMENT_NAME="${QML_ZNO_MODEL_ENV:-qml-zno-modeling}"
+  "${CHECK_SCRIPT}" modeling --env "${ENVIRONMENT_NAME}"
+elif [[ "${INPUT_NOTEBOOK}" == *analysis* ]]; then
   ENVIRONMENT_NAME="${QML_ZNO_ANALYSIS_ENV:-${SIM_ENVIRONMENT}}"
   "${CHECK_SCRIPT}" analysis --env "${ENVIRONMENT_NAME}"
 else

@@ -10,6 +10,7 @@ settings come from the YAML files, not from the notebooks:
 | --- | --- | --- |
 | `zno-co2-lucas.ipynb` | Simulations through `scripts.workflows.run_simulations` (geometry, DFT, CO₂RR, TDDFT, MD, NEB) and a summary of the raw outputs; it runs exactly what `./run_simulations.sh` runs | `RUN_ID`, sites, `MPI_PROCESSES` (6), `RETRY_FAILED`, `RUN_*` flags |
 | `zno-co2-analysis.ipynb` | Analyses of a finished or running simulation run: status dashboard, then `run_analysis` for `co2_reduction` (with the CO₂RR corrections), `neb`, `md_trajectory` and `paper`, exactly as `./run_analysis.sh` | `RUN_ID`, `OUTPUT_ID`, `ANALYSIS_CONFIG` (`configs/analysis/zno_current.yaml`), `RUN_*` flags |
+| `zno-co2-models.ipynb` | Site memory: frame analysis of the MD runs, memory curves at 100 K and 300 K (`scripts.analysis.site_memory`: SVM, QSVM, QSVM with matched bandwidth), and the IBM comparison (`scripts.analysis.site_memory_ibm`: plan, hardware run, reuse of saved kernels) | `RUNS_100K`, `RUNS_300K`, `OUTPUT_ID`, `IBM_*`, `RUN_*` flags |
 
 - Every `RUN_*` flag is `False` in the saved notebooks: nothing runs until one is set.
 - Start them from `notebooks/` or the repository root.
@@ -18,6 +19,10 @@ settings come from the YAML files, not from the notebooks:
   adds `--retry-failed`. Resume rules: [docs/simulations.md](../docs/simulations.md).
   The environment recorded in the run is `QML_ZNO_SIM_ENV` if set, else the kernel's
   environment; a prefix path is recorded by its last component, as by the launchers.
+- Models notebook: outputs go to `results/analyses/site_memory/<OUTPUT_ID>/`; runs whose
+  MD is not completed are left out. Only `RUN_IBM_SUBMIT` contacts IBM (QPU time); it
+  refuses a folder that already holds hardware kernels. Read the plan (`RUN_IBM_PLAN`)
+  first.
 - Analysis notebook: each section runs `python -m scripts.workflows.run_analysis <method>
   --config configs/analysis/zno_current.yaml --scientific-results <run> --run-id
   <OUTPUT_ID>_<section>` into a new `results/analyses/<OUTPUT_ID>_<section>/` (settings
@@ -28,7 +33,8 @@ settings come from the YAML files, not from the notebooks:
 ## Environment
 
 The simulation notebook needs GPAW; the analysis notebook needs ASE, pandas, matplotlib
-and PyYAML. `./setup_lucas_env.sh` (from this directory) creates or checks the
+and PyYAML; the models notebook needs the modeling environment (scikit-learn, Qiskit,
+IBM Runtime). `./setup_lucas_env.sh` (from this directory) creates or checks the
 simulation environment; it accepts the options of `setup_environment.sh`, e.g.
 `--env NAME`. Details: [environments/README.md](../environments/README.md).
 
@@ -47,14 +53,15 @@ Headless:
 ./run_zno_notebook.sh zno-co2-lucas.ipynb zno-co2-lucas.executed.ipynb
 ./run_zno_notebook.sh zno-co2-analysis.ipynb zno-co2-analysis.executed.ipynb
 QML_ZNO_ANALYSIS_ENV=gpaw-dft ./run_zno_notebook.sh zno-co2-analysis.ipynb run2.executed.ipynb
+./run_zno_notebook.sh zno-co2-models.ipynb zno-co2-models.executed.ipynb
 ```
 
 | Item | Behavior |
 | --- | --- |
 | Arguments | `<input> [<output>]`, both relative to `notebooks/`; default input `zno-co2-lucas.ipynb`, default output `<input>.executed.ipynb` |
 | Existing output | Refused; choose a new output name |
-| Environment | Simulation notebook: `QML_ZNO_SIM_ENV` (default `qml-zno-simulation`). Analysis notebook: `QML_ZNO_ANALYSIS_ENV`, else `QML_ZNO_SIM_ENV`. Manager from `QML_ZNO_CONDA` |
-| Checks | `check_environment.sh analysis` for a notebook whose name contains `analysis`, else `check_environment.sh simulation`; then nbconvert, nbclient and ipykernel must import |
+| Environment | Simulation notebook: `QML_ZNO_SIM_ENV` (default `qml-zno-simulation`). Analysis notebook: `QML_ZNO_ANALYSIS_ENV`, else `QML_ZNO_SIM_ENV`. Models notebook: `QML_ZNO_MODEL_ENV` (default `qml-zno-modeling`). Manager from `QML_ZNO_CONDA` |
+| Checks | `check_environment.sh modeling` for a notebook whose name contains `models`, `analysis` for one containing `analysis`, else `simulation`; then nbconvert, nbclient and ipykernel must import |
 | `NB_TIMEOUT` | Per-cell timeout in seconds; default `-1` (none), so a long MPI cell is not killed |
 | `OMP_NUM_THREADS` | Default 1 |
 | Flags | The notebook runs with the `RUN_*` flags saved in it |

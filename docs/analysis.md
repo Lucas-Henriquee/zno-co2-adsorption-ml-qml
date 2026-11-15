@@ -96,7 +96,8 @@ evidence of quantum advantage or of generalization to unseen materials or trajec
 `scripts/analysis/site_memory.py` asks, window by window from the start of the AIMD,
 whether the starting site can still be predicted from the CO₂ geometry. It is not a
 `run_analysis` method; run it in the modeling environment (scikit-learn, and Qiskit for
-the QSVM).
+the QSVM). The same steps, and the IBM comparison below, are in
+`notebooks/zno-co2-models.ipynb`.
 
 1. Frame analysis of every simulation run (writes `md/<material>/<site>/md_frame_analysis.csv`
    into the run; `zno_ic_final` already has it):

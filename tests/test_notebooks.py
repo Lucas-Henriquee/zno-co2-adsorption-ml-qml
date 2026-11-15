@@ -19,6 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 NOTEBOOKS = {
     "simulation": ROOT / "notebooks" / "zno-co2-lucas.ipynb",
     "analysis": ROOT / "notebooks" / "zno-co2-analysis.ipynb",
+    "models": ROOT / "notebooks" / "zno-co2-models.ipynb",
 }
 FLAG = re.compile(r"^(RUN_[A-Z0-9_]+)\s*=\s*(True|False)\b", re.MULTILINE)
 
@@ -111,6 +112,10 @@ class NotebookModulesTest(unittest.TestCase):
 
     def test_analysis_options_are_accepted(self):
         modules = invoked_modules(code_sources(load(NOTEBOOKS["analysis"])))
+        models = models_commands()[0]
+        for command in models:
+            module = command[2]
+            modules.setdefault(module, set()).update(arg for arg in command[3:] if arg.startswith("--"))
         for module, options in modules.items():
             text = help_text(module)
             accepted = set(re.findall(r"--[A-Za-z0-9][A-Za-z0-9-]*", text))
@@ -143,6 +148,79 @@ class AnalysisNotebookDryRunTest(unittest.TestCase):
                 self.assertEqual(namespace["RUN_DIR"], ROOT / "results" / "simulations" / namespace["RUN_ID"])
                 self.assertEqual(namespace["POST_ENV"]["QML_ZNO_RESULTS_DIR"], str(namespace["RUN_DIR"]))
         self.assertEqual(sorted(analyses.iterdir()) if analyses.is_dir() else [], before)
+
+
+def models_commands(flags: dict[str, bool] | None = None, finished: bool = True) -> tuple[list[list[str]], dict]:
+    """Commands the models notebook would run (nothing executed); every flag True by default."""
+    sources = code_sources(load(NOTEBOOKS["models"]))
+    namespace: dict = {}
+    commands: list[list[str]] = []
+    previous = Path.cwd()
+    try:
+        os.chdir(ROOT)
+        with mock.patch("builtins.print"):
+            for index, source in enumerate(sources):
+                if index == 1:
+                    source = FLAG.sub(lambda m: f"{m.group(1)} = {(flags or {}).get(m.group(1), True)}", source)
+                exec(compile(source, "<notebook>", "exec"), namespace)
+                if index == 0:
+                    namespace["run_cmd"] = lambda args: commands.append(list(args))
+                    namespace["md_finished"] = lambda run: finished
+                    for name in ("show_memory", "show_image", "show_csv"):
+                        namespace[name] = lambda *a, **k: None
+    finally:
+        os.chdir(previous)
+    return commands, namespace
+
+
+class ModelsNotebookTest(unittest.TestCase):
+    def test_all_flags_false_runs_nothing(self):
+        for directory in (ROOT, ROOT / "notebooks"):
+            with self.subTest(cwd=directory):
+                previous = Path.cwd()
+                namespace: dict = {}
+                try:
+                    os.chdir(directory)
+                    with mock.patch("subprocess.run") as run, mock.patch("subprocess.Popen") as popen, \
+                            mock.patch("builtins.print"):
+                        for source in code_sources(load(NOTEBOOKS["models"])):
+                            exec(compile(source, "<notebook>", "exec"), namespace)
+                finally:
+                    os.chdir(previous)
+                run.assert_not_called()
+                popen.assert_not_called()
+                self.assertEqual(namespace["LUCAS_DIR"], ROOT)
+
+    def test_commands_with_every_flag(self):
+        commands, namespace = models_commands()
+        modules = [command[2] for command in commands]
+        runs = len(namespace["RUNS_100K"]) + len(namespace["RUNS_300K"])
+        self.assertEqual(modules, ["scripts.analysis.md_trajectory_analysis"] * runs
+                         + ["scripts.analysis.site_memory"] * 2 + ["scripts.analysis.site_memory_ibm"] * 3)
+        plan, submit, reuse = commands[-3:]
+        self.assertNotIn("--submit", plan)
+        self.assertNotIn("--reuse-hardware", plan)
+        self.assertIn("--submit", submit)
+        self.assertIn("--reuse-hardware", reuse)
+        self.assertNotIn("--submit", reuse)
+        outputs = [command[command.index("--output-dir") + 1] for command in commands]
+        # The hardware run completes the plan's folder; every other command has its own.
+        self.assertEqual(outputs[-3], outputs[-2])
+        others = outputs[:-3] + outputs[-1:]
+        self.assertEqual(len(others + outputs[-2:-1]), len(set(others + outputs[-2:-1])))
+        for output in outputs:
+            self.assertTrue(output.startswith(str(ROOT / "results" / "analyses" / "site_memory")), output)
+
+    def test_ibm_is_contacted_only_by_the_submit_flag(self):
+        flags = {name: True for name in ("RUN_FRAMES", "RUN_MEMORY_100K", "RUN_MEMORY_300K", "RUN_IBM_PLAN",
+                                         "RUN_IBM_REUSE")}
+        flags["RUN_IBM_SUBMIT"] = False
+        commands, _ = models_commands(flags)
+        self.assertFalse(any("--submit" in command for command in commands))
+
+    def test_unfinished_runs_are_left_out(self):
+        commands, _ = models_commands(finished=False)
+        self.assertEqual([command for command in commands if "--runs" in command], [])
 
 
 class AnalysisNotebookWorkflowTest(unittest.TestCase):
