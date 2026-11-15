@@ -140,6 +140,24 @@ class SiteMemoryStatisticsTests(unittest.TestCase):
         np.testing.assert_allclose(b, [[np.pi, np.pi]])
 
 
+class BandwidthTests(unittest.TestCase):
+    def test_matched_bandwidth_follows_the_rbf_kernel_of_the_training_rows(self):
+        X = np.random.default_rng(5).uniform(0, np.pi / 2, (12, 3))
+        scale = sm.matched_bandwidth(X)
+        self.assertIn(scale, sm.BANDWIDTH_GRID)
+        target = sm.mean_off_diagonal(sm.rbf_scale_kernel(X))
+        gaps = [abs(sm.mean_off_diagonal(zz_kernel(s * X)) - target) for s in sm.BANDWIDTH_GRID]
+        self.assertAlmostEqual(abs(sm.mean_off_diagonal(zz_kernel(scale * X)) - target), min(gaps))
+        # A narrower spread of features needs a larger lambda for the same kernel width.
+        self.assertGreaterEqual(sm.matched_bandwidth(0.3 * X), scale)
+
+    def test_rbf_scale_kernel_matches_sklearn(self):
+        from sklearn.metrics.pairwise import rbf_kernel
+
+        X = np.random.default_rng(6).uniform(0, 1, (7, 3))
+        np.testing.assert_allclose(sm.rbf_scale_kernel(X), rbf_kernel(X, gamma=1.0 / (3 * X.var())))
+
+
 class QiskitKernelTests(unittest.TestCase):
     def test_statevector_is_the_default_and_needs_qiskit(self):
         args = sm.parse_args(["--runs", "x", "--output-dir", "y"])
@@ -161,7 +179,7 @@ class SiteMemoryEndToEndTests(unittest.TestCase):
             write_run(root / "run", [1, 2, 3], memory_fs=100.0)
             out = root / "out"
             sm.main(["--runs", str(root / "run"), "--output-dir", str(out), "--window-fs", "40",
-                     "--models", "majority", "svm_rbf", "qsvm", "--qsvm-kernel", "zz_exact",
+                     "--models", "majority", "svm_rbf", "qsvm", "qsvm_bw", "--qsvm-kernel", "zz_exact",
                      "--n-permutations", "300"])
             windows = pd.read_csv(out / "site_memory_windows.csv")
             summary = json.loads((out / "site_memory_summary.json").read_text())
@@ -173,6 +191,11 @@ class SiteMemoryEndToEndTests(unittest.TestCase):
             self.assertTrue(bool(first["exact_null"]))
             self.assertGreaterEqual(summary["memory_time_fs"]["svm_rbf"], 80.0)
             self.assertLessEqual(summary["memory_time_fs"]["svm_rbf"], 160.0)
+            self.assertTrue(np.allclose(windows.loc[windows["model"] == "qsvm", "qsvm_bandwidth_mean"], 1.0))
+            matched = windows.loc[windows["model"] == "qsvm_bw", "qsvm_bandwidth_mean"]
+            self.assertTrue(((matched > 0) & (matched <= 1)).all())
+            self.assertEqual(int(windows[(windows["window"] == 0) & (windows["model"] == "qsvm_bw")]
+                                 .iloc[0]["n_correct"]), 9)
             majority = windows[windows["model"] == "majority"]
             self.assertTrue(np.allclose(majority["balanced_accuracy"], 1 / 3))
             self.assertTrue(majority["p_value"].isna().all())

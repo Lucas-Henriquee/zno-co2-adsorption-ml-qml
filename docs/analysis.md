@@ -125,7 +125,11 @@ the QSVM).
   (P(2x) of the ZZ map has period π); the same C (1) for every model, no tuning.
 - Models: majority, nearest centroid, logistic, RBF SVM and QSVM (Qiskit
   `zz_feature_map`, statevector; `--qsvm-kernel zz_exact` computes the same kernel
-  with numpy).
+  with numpy). `qsvm` is the standard ZZ map; `qsvm_bw` encodes λ·x with λ ≤ 1 chosen
+  per split from the training features only (no labels) so that its kernel has the mean
+  off-diagonal entry of the RBF kernel. The standard ZZ kernel is narrow (Shaydulin &
+  Wild 2022); `qsvm_bw` shows how much of the gap to the SVM comes from that. The mean λ
+  per window is the `qsvm_bandwidth_mean` column.
 - Significance: site labels permuted within each seed, whole evaluation rerun. The
   smallest attainable p is 1/36 with 3 seeds and 1/7776 with 6.
 - Memory time: end of the last window of the run of significant windows (p ≤ 0.05)
@@ -155,6 +159,10 @@ python -m scripts.analysis.site_memory_ibm --runs results/simulations/zno_md_100
   fit, so one kernel per window serves every split: N(N−1)/2 circuits (36 for 3 seeds,
   153 for 6). `--scaling train` fits MinMax per split as `site_memory.py` and needs one
   kernel per split.
+- `--qsvm-bandwidth` sets λ of both QSVMs: `1` (default, standard ZZ map), a number, or
+  `auto` (as `qsvm_bw`; with `--scaling fixed`, the median over splits, so one kernel per
+  window still serves every split). Run once per bandwidth with its own `--output-dir`;
+  saved hardware kernels are refused for another bandwidth.
 - Hardware kernels: training diagonal 1, training matrix projected onto the PSD cone,
   test entries as measured. The off-diagonal deviation from the ideal kernel (MAE,
   RMSE, bias) and the reported quantum time are saved.

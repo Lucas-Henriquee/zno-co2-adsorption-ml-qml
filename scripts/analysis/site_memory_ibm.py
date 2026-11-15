@@ -26,6 +26,14 @@ Scaling (``--scaling``):
 
 Upper limit pi/2: P(2x) of the ZZ feature map has period pi in x.
 
+QSVM bandwidth (``--qsvm-bandwidth``): the ideal and the hardware QSVM encode
+lambda * x. ``1`` (default) is the standard ZZ map; a number sets lambda; ``auto`` picks
+it as ``site_memory.py`` does for ``qsvm_bw`` (mean off-diagonal kernel entry of the RBF
+kernel, training features only, no labels): per split with ``--scaling train``, and with
+``--scaling fixed`` the median of the per-split values, so that one kernel still serves
+every split. The RBF SVM does not depend on lambda. Run once per bandwidth (separate
+``--output-dir``) to compare the standard and the matched kernel on hardware.
+
 Hardware kernels: the training diagonal is 1 (ideal value of K(x, x)); the training
 kernel is projected onto the positive semidefinite cone (eigenvalues clipped at 0); test
 entries are used as measured. Raw hardware kernels, job ids, circuit statistics and the
@@ -72,6 +80,9 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument("--c", type=float, default=1.0)
     parser.add_argument("--qsvm-reps", type=int, default=1)
     parser.add_argument("--qsvm-entanglement", default="linear", choices=["linear", "circular", "full"])
+    parser.add_argument("--qsvm-bandwidth", default="1",
+                        help="lambda in the encoding lambda * x of both QSVMs: a number in (0, 1] or 'auto' "
+                             "(default 1, the standard ZZ map).")
     parser.add_argument("--ideal-kernel", default="statevector", choices=["statevector", "zz_exact"])
     parser.add_argument("--n-permutations", type=int, default=1000)
     parser.add_argument("--alpha", type=float, default=0.05)
@@ -99,6 +110,19 @@ def scale_fixed(X: np.ndarray, low: float, high: float) -> tuple[np.ndarray, int
     """Map [low, high] to [0, pi/2], clipping outside values; returns (Z, n_clipped)."""
     clipped = int(np.sum((X < low) | (X > high)))
     return sm.FEATURE_RANGE * (np.clip(X, low, high) - low) / (high - low), clipped
+
+
+def parse_bandwidth(value: str):
+    """'auto' or a float in (0, 1]."""
+    if value == "auto":
+        return "auto"
+    try:
+        number = float(value)
+    except ValueError:
+        raise SystemExit("[site-memory-ibm] --qsvm-bandwidth must be a number in (0, 1] or 'auto'.") from None
+    if not 0 < number <= 1:
+        raise SystemExit("[site-memory-ibm] --qsvm-bandwidth must be in (0, 1].")
+    return number
 
 
 def array_sha256(values: np.ndarray) -> str:
@@ -139,15 +163,29 @@ class WindowJob:
             else:
                 train_x, test_x = sm.scale_features(self.X[~test], self.X[test])
             self.splits.append((~test, test, train_x, test_x))
+        # Bandwidth of the QSVM encoding lambda * x, one value per split.
+        setting = parse_bandwidth(args.qsvm_bandwidth)
+        if setting == "auto":
+            per_split = [sm.matched_bandwidth(train_x, args.qsvm_reps, args.qsvm_entanglement)
+                         for _, _, train_x, _ in self.splits]
+            if args.scaling == "fixed":
+                per_split = [float(np.median(per_split))] * len(self.splits)
+        else:
+            per_split = [setting] * len(self.splits)
+        self.bandwidths = per_split
+        if args.scaling == "fixed":
+            self.Zq = self.bandwidths[0] * self.Z
+        self.quantum_splits = [(scale * train_x, scale * test_x)
+                               for scale, (_, _, train_x, test_x) in zip(self.bandwidths, self.splits)]
 
     def kernel_requests(self) -> list[dict]:
         """Kernel matrices to estimate: one symmetric matrix (fixed) or one pair per split (train)."""
         if self.scaling == "fixed":
-            n = len(self.Z)
-            return [{"name": f"w{self.window}_all", "kind": "symmetric", "left": self.Z,
+            n = len(self.Zq)
+            return [{"name": f"w{self.window}_all", "kind": "symmetric", "left": self.Zq,
                      "circuits": n * (n - 1) // 2}]
         requests = []
-        for index, (_, _, train_x, test_x) in enumerate(self.splits):
+        for index, (train_x, test_x) in enumerate(self.quantum_splits):
             n_tr, n_te = len(train_x), len(test_x)
             requests.append({"name": f"w{self.window}_split{index}_train", "kind": "symmetric", "left": train_x,
                              "circuits": n_tr * (n_tr - 1) // 2})
@@ -301,7 +339,8 @@ def evaluate(job: WindowJob, kernels_by_model: dict, args, rng) -> tuple[list[di
                      "balanced_accuracy": observed, "n_correct": int(np.sum(predicted == job.y)),
                      "n_trajectories": int(len(job.y)),
                      "p_value": float((1 + np.sum(null >= observed - 1e-12)) / (1 + len(null))),
-                     "null_mean": float(null.mean()), "n_null": int(len(null)), "exact_null": bool(exact)})
+                     "null_mean": float(null.mean()), "n_null": int(len(null)), "exact_null": bool(exact),
+                     "qsvm_bandwidth_mean": float(np.mean(job.bandwidths)) if model != "svm_rbf" else float("nan")})
         predictions += [{"window": job.window, "model": model, "seed": int(s), "site": args.sites[int(t)],
                          "predicted_site": args.sites[int(p)]}
                         for s, t, p in zip(job.seeds, job.y, predicted)]
@@ -315,6 +354,7 @@ def plan(jobs: list[WindowJob], args) -> dict:
         windows.append({"window": job.window, "t_start_fs": job.t_start, "t_end_fs": job.t_end,
                         "trajectories": int(len(job.y)), "seeds": sorted(set(job.seeds.tolist())),
                         "clipped_feature_values": job.clipped,
+                        "qsvm_bandwidths": [round(b, 6) for b in job.bandwidths],
                         "kernels": [{"name": r["name"], "circuits": r["circuits"]} for r in requests],
                         "circuits": int(sum(r["circuits"] for r in requests))})
     circuits = sum(w["circuits"] for w in windows)
@@ -322,13 +362,15 @@ def plan(jobs: list[WindowJob], args) -> dict:
             "total_shots": int(circuits * args.shots), "scaling": args.scaling,
             "feature_range_ang": args.feature_range_ang if args.scaling == "fixed" else None,
             "qubits": int(jobs[0].X.shape[1]), "feature_map": "zz_feature_map",
-            "reps": args.qsvm_reps, "entanglement": args.qsvm_entanglement}
+            "reps": args.qsvm_reps, "entanglement": args.qsvm_entanglement,
+            "qsvm_bandwidth": args.bandwidth}
 
 
 def main(argv=None) -> int:
     args = parse_args(argv)
     if args.submit and args.reuse_hardware is not None:
         raise SystemExit("[site-memory-ibm] use either --submit or --reuse-hardware, not both.")
+    args.bandwidth = parse_bandwidth(args.qsvm_bandwidth)
     low, high = args.feature_range_ang
     if not high > low:
         raise SystemExit("[site-memory-ibm] --feature-range-ang needs LOW < HIGH.")

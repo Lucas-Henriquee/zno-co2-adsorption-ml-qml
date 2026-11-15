@@ -32,6 +32,13 @@ largest training value of a feature would be encoded as the same phase. The RBF 
 Every model uses the same C (``--c``, default 1, no tuning: with 2-5 training seeds per
 split there is nothing to tune on).
 
+QSVM bandwidth. ``qsvm`` is the standard ZZ map on the scaled features. Its fidelity
+kernel is narrow (it falls off quickly with distance), a known limit of fidelity kernels
+(Shaydulin & Wild 2022). ``qsvm_bw`` encodes lambda * x instead, with lambda <= 1 chosen
+in each split, from the training features only and without labels, so that the mean
+off-diagonal entry of its training kernel equals that of the RBF kernel (gamma = scale)
+on the same rows. The labels never enter this choice, so the permutation test reuses it.
+
 Statistic and significance. The pooled balanced accuracy of all held-out predictions of
 a window (each trajectory is predicted once). Null distribution: the site labels are
 permuted within each seed (each seed keeps one trajectory per site) and the whole
@@ -74,11 +81,13 @@ FEATURE_SETS = {
 # Defined relative to the site positions or to the starting position: never features.
 LEAKING_COLUMNS = ("nearest_site", "nearest_site_lateral_ang", "start_site_lateral_ang",
                    "msd_lateral_ang2", "site_assignment")
-MODELS = ("majority", "nearest_centroid", "logistic", "svm_rbf", "qsvm")
+MODELS = ("majority", "nearest_centroid", "logistic", "svm_rbf", "qsvm", "qsvm_bw")
+QSVM_MODELS = ("qsvm", "qsvm_bw")
 DEFAULT_MODELS = MODELS
-PLOTTED_MODELS = ("svm_rbf", "qsvm", "nearest_centroid")
+PLOTTED_MODELS = ("svm_rbf", "qsvm", "qsvm_bw", "nearest_centroid")
 MODEL_LABELS = {"majority": "Majority", "nearest_centroid": "Nearest centroid", "logistic": "Logistic",
-                "svm_rbf": "SVM (RBF)", "qsvm": "QSVM (ZZ)"}
+                "svm_rbf": "SVM (RBF)", "qsvm": "QSVM (ZZ)",
+                "qsvm_bw": "QSVM (ZZ, matched bandwidth)"}
 MD_KEYS = ("temperature_kelvin", "timestep_fs", "log_interval", "equilibration_steps")
 
 
@@ -225,22 +234,56 @@ def make_model(name: str, c: float, random_state: int):
         return LogisticRegression(C=c, class_weight="balanced", max_iter=5000)
     if name == "svm_rbf":
         return SVC(kernel="rbf", C=c, gamma="scale", class_weight="balanced", random_state=random_state)
-    if name == "qsvm":
+    if name in QSVM_MODELS:
         return SVC(kernel="precomputed", C=c, class_weight="balanced")
     raise ValueError(f"Unknown model {name!r}")
 
 
-class SplitCache:
-    """Scaled features and QSVM kernels of each leave-one-seed-out split (label independent)."""
+# Candidate bandwidths of qsvm_bw: never wider in angle than the standard map (lambda = 1).
+BANDWIDTH_GRID = np.geomspace(0.02, 1.0, 80)
 
-    def __init__(self, X: np.ndarray, seeds: np.ndarray, kernel):
+
+def mean_off_diagonal(matrix: np.ndarray) -> float:
+    n = len(matrix)
+    return float((matrix.sum() - np.trace(matrix)) / (n * (n - 1))) if n > 1 else 1.0
+
+
+def rbf_scale_kernel(X: np.ndarray) -> np.ndarray:
+    """RBF kernel with sklearn's gamma = 'scale' (1 / (n_features * X.var()))."""
+    variance = float(X.var())
+    gamma = 1.0 / (X.shape[1] * variance) if variance > 0 else 1.0
+    squared = np.sum((X[:, None, :] - X[None, :, :]) ** 2, axis=-1)
+    return np.exp(-gamma * squared)
+
+
+def matched_bandwidth(train_x: np.ndarray, reps: int = 1, entanglement: str = "linear",
+                      grid: np.ndarray = BANDWIDTH_GRID) -> float:
+    """lambda of the grid whose ZZ kernel on lambda * train_x has the mean off-diagonal entry of the
+    RBF (gamma = scale) kernel on train_x. Uses the training features only, never the labels."""
+    from scripts.models.qml.zz_kernel import zz_kernel
+
+    target = mean_off_diagonal(rbf_scale_kernel(train_x))
+    gaps = [abs(mean_off_diagonal(zz_kernel(scale * train_x, reps=reps, entanglement=entanglement)) - target)
+            for scale in grid]
+    return float(grid[int(np.argmin(gaps))])
+
+
+class SplitCache:
+    """Scaled features, QSVM kernels and bandwidths of each leave-one-seed-out split (label independent)."""
+
+    def __init__(self, X: np.ndarray, seeds: np.ndarray, kernel, qsvm_models=(), reps: int = 1,
+                 entanglement: str = "linear"):
         self.splits = []
+        self.kernels = {model: [] for model in qsvm_models}
+        self.bandwidths = {model: [] for model in qsvm_models}
         for seed in sorted(set(seeds.tolist())):
             test = seeds == seed
             train_x, test_x = scale_features(X[~test], X[test])
-            k_train = kernel(train_x) if kernel is not None else None
-            k_test = kernel(test_x, train_x) if kernel is not None else None
-            self.splits.append((~test, test, train_x, test_x, k_train, k_test))
+            self.splits.append((~test, test, train_x, test_x))
+            for model in qsvm_models:
+                scale = 1.0 if model == "qsvm" else matched_bandwidth(train_x, reps, entanglement)
+                self.bandwidths[model].append(scale)
+                self.kernels[model].append((kernel(scale * train_x), kernel(scale * test_x, scale * train_x)))
 
 
 def make_qsvm_kernel(args, n_features: int):
@@ -262,9 +305,10 @@ def make_qsvm_kernel(args, n_features: int):
 
 def loso_predictions(cache: SplitCache, y: np.ndarray, model: str, c: float, random_state: int) -> np.ndarray:
     predicted = np.empty_like(y)
-    for train, test, train_x, test_x, k_train, k_test in cache.splits:
+    for index, (train, test, train_x, test_x) in enumerate(cache.splits):
         estimator = make_model(model, c, random_state)
-        if model == "qsvm":
+        if model in QSVM_MODELS:
+            k_train, k_test = cache.kernels[model][index]
             estimator.fit(k_train, y[train])
             predicted[test] = estimator.predict(k_test)
         else:
@@ -307,7 +351,8 @@ def analyse_window(rows: pd.DataFrame, features: list[str], models: list[str], k
     X = rows[features].to_numpy(dtype=float)
     y = rows["label"].to_numpy(dtype=int)
     seeds = rows["seed"].to_numpy(dtype=int)
-    cache = SplitCache(X, seeds, kernel if "qsvm" in models else None)
+    qsvm_models = [model for model in models if model in QSVM_MODELS]
+    cache = SplitCache(X, seeds, kernel, qsvm_models, args.qsvm_reps, args.qsvm_entanglement)
     labelings, exact = within_seed_relabelings(y, seeds, args.n_permutations, rng)
     results, predictions = [], []
     for model in models:
@@ -323,7 +368,9 @@ def analyse_window(rows: pd.DataFrame, features: list[str], models: list[str], k
         results.append({"model": model, "balanced_accuracy": observed,
                         "n_correct": int(np.sum(predicted == y)), "n_trajectories": int(len(y)),
                         "p_value": p_value, "null_mean": float(null.mean()) if len(null) else float("nan"),
-                        "n_null": int(len(null)), "exact_null": bool(exact)})
+                        "n_null": int(len(null)), "exact_null": bool(exact),
+                        "qsvm_bandwidth_mean": float(np.mean(cache.bandwidths[model]))
+                        if model in cache.bandwidths else float("nan")})
         predictions += [{"model": model, "seed": int(s), "site_label": int(t), "predicted_label": int(p)}
                         for s, t, p in zip(seeds, y, predicted)]
     return results, predictions
@@ -386,7 +433,8 @@ def main(argv=None) -> int:
     edges = window_edges(frames, args.window_fs, args.t_max_fs)
     dataset = window_dataset(frames, features, edges, args.sites)
 
-    kernel = make_qsvm_kernel(args, len(features)) if "qsvm" in args.models else None
+    uses_qsvm = any(model in QSVM_MODELS for model in args.models)
+    kernel = make_qsvm_kernel(args, len(features)) if uses_qsvm else None
     rng = np.random.default_rng(args.random_state)
     window_rows, prediction_rows = [], []
     for index, (lo, hi) in enumerate(edges):
@@ -435,8 +483,13 @@ def main(argv=None) -> int:
         "validation": "leave one seed out; one row per trajectory per window",
         "permutation": "site labels permuted within each seed; whole evaluation rerun",
         "qsvm_kernel": {"name": args.qsvm_kernel, "feature_map": "zz_feature_map", "reps": args.qsvm_reps,
-                        "entanglement": args.qsvm_entanglement, "qubits": len(features)}
-        if "qsvm" in args.models else None,
+                        "entanglement": args.qsvm_entanglement, "qubits": len(features),
+                        "bandwidth": {"qsvm": 1.0,
+                                      "qsvm_bw": ("per split, from the training features only: the lambda in "
+                                                  f"[{BANDWIDTH_GRID[0]:g}, 1] whose ZZ kernel on lambda * x has "
+                                                  "the mean off-diagonal entry of the RBF (gamma = scale) kernel; "
+                                                  "the mean per window is in site_memory_windows.csv")}}
+        if uses_qsvm else None,
         "alpha": args.alpha,
         "chance_level": 1.0 / len(args.sites),
         "memory_time_fs": memory,

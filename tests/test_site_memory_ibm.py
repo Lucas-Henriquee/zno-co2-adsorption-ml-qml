@@ -61,6 +61,21 @@ class SiteMemoryIBMTests(unittest.TestCase):
         plan = json.loads((out / "site_memory_ibm_plan.json").read_text())
         self.assertEqual(plan["windows"][0]["circuits"], 3 * (15 + 3 * 6))
 
+    def test_auto_bandwidth_with_fixed_scaling_keeps_one_kernel_per_window(self):
+        out = self.root / "plan_bw"
+        smi.main(["--runs", self.run, "--output-dir", str(out), "--qsvm-bandwidth", "auto", *BASE])
+        plan = json.loads((out / "site_memory_ibm_plan.json").read_text())
+        self.assertEqual(plan["total_circuits"], 2 * 36)
+        for window in plan["windows"]:
+            self.assertEqual(len(set(window["qsvm_bandwidths"])), 1)
+            self.assertTrue(0 < window["qsvm_bandwidths"][0] <= 1)
+
+    def test_bad_bandwidth_is_refused(self):
+        for value in ("0", "1.5", "wide"):
+            with self.assertRaisesRegex(SystemExit, "qsvm-bandwidth"):
+                smi.main(["--runs", self.run, "--output-dir", str(self.root / "x"), "--qsvm-bandwidth", value,
+                          *BASE])
+
     def test_unknown_window_start_is_refused(self):
         with self.assertRaisesRegex(SystemExit, "no window starts at 30"):
             smi.main(["--runs", self.run, "--output-dir", str(self.root / "x"), "--window-starts-fs", "30",
@@ -96,6 +111,10 @@ class SiteMemoryIBMTests(unittest.TestCase):
                       str(out / smi.HARDWARE_DIR), *BASE])
         again = pd.read_csv(reused / "site_memory_ibm_windows.csv")
         pd.testing.assert_frame_equal(windows, again)
+        # Kernels measured with lambda = 1 cannot be reused for another bandwidth.
+        with self.assertRaisesRegex(SystemExit, "other data"):
+            smi.main(["--runs", self.run, "--output-dir", str(self.root / "reuse_bw"), "--reuse-hardware",
+                      str(out / smi.HARDWARE_DIR), "--qsvm-bandwidth", "0.5", *BASE])
 
     def test_reuse_refuses_kernels_of_other_data(self):
         folder = self.root / "saved"
