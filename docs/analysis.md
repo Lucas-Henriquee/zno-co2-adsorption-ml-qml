@@ -110,7 +110,8 @@ the QSVM).
    interval and equilibration, and distinct seeds:
 
    ```bash
-   python -m scripts.analysis.site_memory --runs results/simulations/zno_md_100k \
+   python -m scripts.analysis.site_memory \
+     --runs results/simulations/zno_md_100k results/simulations/zno_md_100k_extra \
      --output-dir results/analyses/site_memory/100k
    python -m scripts.analysis.site_memory \
      --runs results/simulations/zno_ic_final results/simulations/zno_md_300k_extra \

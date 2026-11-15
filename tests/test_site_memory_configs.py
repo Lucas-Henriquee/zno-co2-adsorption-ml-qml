@@ -10,6 +10,7 @@ PRODUCTION = ROOT / "configs/simulations/zno_production.yaml"
 CASES = {
     "zno_md_100k.yaml": {"temperature_kelvin": 100.0, "seeds": [1234, 2345, 3456]},
     "zno_md_300k_extra.yaml": {"temperature_kelvin": 300.0, "seeds": [4567, 5678, 6789]},
+    "zno_md_100k_extra.yaml": {"temperature_kelvin": 100.0, "seeds": [4567, 5678, 6789]},
 }
 SHORT_MD = {"steps": 500, "equilibration_steps": 500, "production_steps": 500}
 
