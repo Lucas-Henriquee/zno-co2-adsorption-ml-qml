@@ -12,7 +12,7 @@ import pandas as pd
 from scripts.analysis import site_memory_ibm as smi
 from scripts.models.qml.zz_kernel import zz_kernel
 from scripts.models.qml_ibm import qsvm_ibm_hardware as hw
-from tests.test_site_memory import write_run
+from site_memory_fixtures import write_run
 
 BASE = ["--window-starts-fs", "0", "200", "--ideal-kernel", "zz_exact", "--n-permutations", "300"]
 

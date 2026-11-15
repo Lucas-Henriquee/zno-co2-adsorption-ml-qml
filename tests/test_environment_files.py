@@ -41,7 +41,8 @@ GPAW_ONLY = {"gpaw", "dftd3"}
 # Optional, not in any environment: export_pymol renders fig01 with PyMOL
 # (pymol-open-source) when importable, else with its ASE/matplotlib fallback.
 OPTIONAL = {"pymol", "pymol2"}
-FIRST_PARTY = {"scripts", "tests"}
+# Test modules import helper modules of tests/ by name (pytest puts tests/ on sys.path).
+FIRST_PARTY = {"scripts", "tests"} | {path.stem for path in (ROOT / "tests").glob("*.py")}
 STDLIB = set(sys.stdlib_module_names) | {"__future__"}
 NAME_PATTERN = re.compile(r"^\s*([A-Za-z0-9][A-Za-z0-9._-]*)")
 
