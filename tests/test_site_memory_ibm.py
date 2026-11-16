@@ -1,5 +1,6 @@
 """site_memory_ibm: plan without network, hardware path with a fake backend, reuse of saved kernels."""
 
+import contextlib
 import json
 import tempfile
 import unittest
@@ -115,6 +116,57 @@ class SiteMemoryIBMTests(unittest.TestCase):
         with self.assertRaisesRegex(SystemExit, "other data"):
             smi.main(["--runs", self.run, "--output-dir", str(self.root / "reuse_bw"), "--reuse-hardware",
                       str(out / smi.HARDWARE_DIR), "--qsvm-bandwidth", "0.5", *BASE])
+
+    def test_missing_quantum_time_is_null_and_can_be_refreshed(self):
+        out = self.root / "hw_usage"
+
+        def train_without_usage(X, *args, **kwargs):
+            raw, projected, stats, timing, _ = fake_train(X)
+            return raw, projected, stats, timing, [{"job_id": "job-a", "quantum_seconds": None}]
+
+        class Job:
+            def __init__(self, seconds):
+                self.seconds = seconds
+
+            def metrics(self):
+                return {"usage": {"quantum_seconds": self.seconds}}
+
+        class Service:
+            def __init__(self, seconds):
+                self.seconds = seconds
+
+            def job(self, job_id):
+                return Job(self.seconds)
+
+        patches = [
+            mock.patch.object(hw, "create_runtime_service", return_value=Service(None)),
+            mock.patch.object(hw, "pick_backend", return_value=FakeBackend()),
+            mock.patch.object(hw, "build_hardware_executor", return_value=(object(), object())),
+            mock.patch.object(hw, "evaluate_hardware_kernel_train", side_effect=train_without_usage),
+            mock.patch("scripts.models.qml.qsvm_baseline.build_feature_map", return_value=(None, "fake")),
+            mock.patch("time.sleep"),
+        ]
+        with contextlib.ExitStack() as stack:
+            for patch in patches:
+                stack.enter_context(patch)
+            smi.main(["--runs", self.run, "--output-dir", str(out), "--submit", "--usage-retries", "2",
+                      "--window-starts-fs", "0", "--ideal-kernel", "zz_exact", "--n-permutations", "50"])
+        summary = json.loads((out / "site_memory_ibm_summary.json").read_text())
+        self.assertIsNone(summary["hardware"]["quantum_seconds"])  # never reported as 0
+
+        reused = self.root / "hw_usage_reuse"
+        with mock.patch.object(hw, "create_runtime_service", return_value=Service(16)):
+            smi.main(["--runs", self.run, "--output-dir", str(reused), "--reuse-hardware",
+                      str(out / smi.HARDWARE_DIR), "--refresh-usage",
+                      "--window-starts-fs", "0", "--ideal-kernel", "zz_exact", "--n-permutations", "50"])
+        summary = json.loads((reused / "site_memory_ibm_summary.json").read_text())
+        self.assertEqual(summary["hardware"]["quantum_seconds"], 16.0)
+        record = json.loads((out / smi.HARDWARE_DIR / "hardware_record.json").read_text())
+        self.assertEqual(record["kernels"]["w0_all"]["quantum_seconds"], 16.0)
+
+    def test_refresh_usage_needs_saved_kernels(self):
+        with self.assertRaisesRegex(SystemExit, "refresh-usage"):
+            smi.main(["--runs", self.run, "--output-dir", str(self.root / "x"), "--refresh-usage", *BASE])
 
     def test_reuse_refuses_kernels_of_other_data(self):
         folder = self.root / "saved"

@@ -40,6 +40,11 @@ entries are used as measured. Raw hardware kernels, job ids, circuit statistics 
 reported quantum time are saved, so the analysis can be redone without the QPU
 (``--reuse-hardware DIR``).
 
+Quantum time: IBM may publish a job's usage only some time after the job finishes. The
+script re-reads the usage of every job after the last one ends (a few tries) and stores
+null, never 0, when it is still missing; ``--reuse-hardware DIR --refresh-usage`` reads it
+again later (job metadata only, no circuits) and updates DIR/hardware_record.json.
+
 Safety: without ``--submit`` (and without ``--reuse-hardware``) the script only writes
 the plan (windows, rows, circuits, shots) and never contacts IBM. ``--submit`` needs a
 saved Qiskit Runtime account (QiskitRuntimeService.save_account) and runs on the
@@ -100,6 +105,11 @@ def parse_args(argv=None) -> argparse.Namespace:
     hardware.add_argument("--transpiler-seed", type=int, default=42)
     hardware.add_argument("--max-circuits-per-job", type=int, default=100)
     hardware.add_argument("--force-ipv4", action="store_true")
+    hardware.add_argument("--refresh-usage", action="store_true",
+                          help="With --reuse-hardware: read the jobs' quantum time from IBM again (metadata only, "
+                               "no circuits) and update hardware_record.json.")
+    hardware.add_argument("--usage-retries", type=int, default=6,
+                          help="Tries, 10 s apart, to read the quantum time after a hardware run.")
     parser.add_argument("--output-dir", type=Path, required=True)
     return parser.parse_args(argv)
 
@@ -263,11 +273,54 @@ def run_on_hardware(jobs: list[WindowJob], args, output: Path) -> tuple[dict, di
                 "circuits": request["circuits"], "left_sha256": array_sha256(request["left"]),
                 "right_sha256": array_sha256(request["right"]) if "right" in request else None,
                 "circuit_stats": stats, "timing": timing, "jobs": job_records,
-                "quantum_seconds": sum(float(r.get("quantum_seconds") or 0.0) for r in job_records),
+                "quantum_seconds": usage_sum(job_records),
             }
-            (folder / "hardware_record.json").write_text(json.dumps(record, indent=2, default=str) + "\n",
-                                                         encoding="utf-8")
+            write_record(folder, record)
+    refresh_usage(service, record, args.usage_retries)
+    write_record(folder, record)
     return raw, record
+
+
+def write_record(folder: Path, record: dict) -> None:
+    (folder / "hardware_record.json").write_text(json.dumps(record, indent=2, default=str) + "\n", encoding="utf-8")
+
+
+def usage_sum(job_records: list[dict]) -> float | None:
+    """Sum of the jobs' quantum seconds; None when any job has no reported value."""
+    values = [record.get("quantum_seconds") for record in job_records]
+    if not values or any(value is None for value in values):
+        return None
+    return float(sum(float(value) for value in values))
+
+
+def total_usage(record: dict) -> float | None:
+    values = [kernel.get("quantum_seconds") for kernel in record["kernels"].values()]
+    if not values or any(value is None for value in values):
+        return None
+    return float(sum(values))
+
+
+def refresh_usage(service, record: dict, tries: int, wait_s: float = 10.0) -> None:
+    """Read the quantum seconds of jobs that have none (IBM publishes usage after the job ends)."""
+    import time
+
+    for attempt in range(max(tries, 1)):
+        missing = [job for kernel in record["kernels"].values() for job in kernel["jobs"]
+                   if job.get("quantum_seconds") is None and job.get("job_id")]
+        if not missing:
+            break
+        if attempt:
+            time.sleep(wait_s)
+        for job in missing:
+            try:
+                usage = (service.job(job["job_id"]).metrics() or {}).get("usage") or {}
+            except Exception as exc:  # network or permission: keep None and report it
+                job["usage_error"] = str(exc)
+                continue
+            if usage.get("quantum_seconds") is not None:
+                job["quantum_seconds"] = float(usage["quantum_seconds"])
+    for kernel in record["kernels"].values():
+        kernel["quantum_seconds"] = usage_sum(kernel["jobs"])
 
 
 def load_hardware(jobs: list[WindowJob], folder: Path) -> tuple[dict, dict]:
@@ -370,6 +423,8 @@ def main(argv=None) -> int:
     args = parse_args(argv)
     if args.submit and args.reuse_hardware is not None:
         raise SystemExit("[site-memory-ibm] use either --submit or --reuse-hardware, not both.")
+    if args.refresh_usage and args.reuse_hardware is None:
+        raise SystemExit("[site-memory-ibm] --refresh-usage needs --reuse-hardware DIR.")
     args.bandwidth = parse_bandwidth(args.qsvm_bandwidth)
     low, high = args.feature_range_ang
     if not high > low:
@@ -410,7 +465,18 @@ def main(argv=None) -> int:
     if args.submit:
         raw, record = run_on_hardware(jobs, args, output)
     elif args.reuse_hardware is not None:
-        raw, record = load_hardware(jobs, args.reuse_hardware.expanduser().resolve())
+        folder = args.reuse_hardware.expanduser().resolve()
+        raw, record = load_hardware(jobs, folder)
+        if args.refresh_usage:
+            from scripts.models.qml_ibm import qsvm_ibm_hardware as hw
+
+            hw.configure_runtime_network(args.force_ipv4)
+            for kernel in record["kernels"].values():  # re-read every job, also stored zeros
+                for job_record in kernel["jobs"]:
+                    if not job_record.get("quantum_seconds"):
+                        job_record["quantum_seconds"] = None
+            refresh_usage(hw.create_runtime_service(args.account, args.instance), record, 1)
+            write_record(folder, record)
     else:
         print("[site-memory-ibm] plan only (no --submit): IBM was not contacted. The SVM and ideal QSVM "
               "are evaluated below; add --submit to run the hardware kernels.")
@@ -443,13 +509,17 @@ def main(argv=None) -> int:
             "backend": record.get("backend"), "job_tag": record.get("job_tag"),
             "shots": args.shots, "optimization_level": args.optimization_level,
             "transpiler_seed": args.transpiler_seed,
-            "quantum_seconds": sum(k.get("quantum_seconds") or 0.0 for k in record["kernels"].values()),
+            "quantum_seconds": total_usage(record),
             "reused_from": str(args.reuse_hardware) if args.reuse_hardware else None},
         "hardware_kernel_handling": "training diagonal 1, training kernel projected to PSD, test entries as measured",
         "validation": "leave one seed out; same rows, splits, scaling and C for every model",
     }
     (output / "site_memory_ibm_summary.json").write_text(json.dumps(summary, indent=2, default=str) + "\n",
                                                          encoding="utf-8")
+    if record is not None:
+        seconds = total_usage(record)
+        print("[site-memory-ibm] quantum time: " + ("not reported yet (rerun with --reuse-hardware DIR "
+                                                    "--refresh-usage)" if seconds is None else f"{seconds:g} s"))
     print(f"[site-memory-ibm] wrote {output}")
     return 0
 

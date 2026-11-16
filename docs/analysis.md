@@ -164,6 +164,9 @@ python -m scripts.analysis.site_memory_ibm --runs results/simulations/zno_md_100
   `auto` (as `qsvm_bw`; with `--scaling fixed`, the median over splits, so one kernel per
   window still serves every split). Run once per bandwidth with its own `--output-dir`;
   saved hardware kernels are refused for another bandwidth.
+- Quantum time: IBM can publish a job's usage after the job ends; it is read again after
+  the run and stored as null (never 0) if still missing. `--reuse-hardware <dir>
+  --refresh-usage` reads it later (job metadata only, no circuits) and updates the record.
 - Hardware kernels: training diagonal 1, training matrix projected onto the PSD cone,
   test entries as measured. The off-diagonal deviation from the ideal kernel (MAE,
   RMSE, bias) and the reported quantum time are saved.
