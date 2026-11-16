@@ -202,6 +202,14 @@ python -m scripts.analysis.site_memory_ibm --runs results/simulations/zno_md_100
 - Quantum time: IBM can publish a job's usage after the job ends; it is read again after
   the run and stored as null (never 0) if still missing. `--reuse-hardware <dir>
   --refresh-usage` reads it later (job metadata only, no circuits) and updates the record.
+- Summary of every saved hardware run (no IBM access): `python -m
+  scripts.analysis.site_memory_ibm_summary --output-dir results/analyses/site_memory/ibm_summary`
+  reads the `ibm_*` folders under `--root` (default `results/analyses/site_memory`),
+  skips plan-only and reuse folders, refuses folders of different MD data, and writes
+  `ibm_summary.csv` (per run and window: correct/p of the three models, kernel deviation,
+  depth, two-qubit gates, quantum seconds), `ibm_repeats.csv` (repeated configurations:
+  run-to-run kernel difference and prediction agreement), `ibm_summary.json` (totals)
+  and `ibm_summary.png`.
 - Hardware kernels: training diagonal 1, training matrix projected onto the PSD cone,
   test entries as measured. The off-diagonal deviation from the ideal kernel (MAE,
   RMSE, bias) and the reported quantum time are saved.

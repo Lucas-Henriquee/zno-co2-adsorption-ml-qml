@@ -198,7 +198,8 @@ class ModelsNotebookTest(unittest.TestCase):
         runs = len(namespace["RUNS_100K"]) + len(namespace["RUNS_300K"])
         self.assertEqual(modules, ["scripts.analysis.md_trajectory_analysis"] * runs
                          + ["scripts.analysis.site_memory"] * 2 + ["scripts.models.qml_ibm.ibm_account"]
-                         + ["scripts.analysis.site_memory_ibm"] * 3)
+                         + ["scripts.analysis.site_memory_ibm"] * 3 + ["scripts.analysis.site_memory_ibm_summary"])
+        commands = commands[:-1]  # the summary only reads the folders above
         check = commands[-4]
         self.assertEqual(check[3], "check")  # the notebook never saves the key
         self.assertNotIn("save", check)
