@@ -122,7 +122,7 @@ class SiteMemoryIBMTests(unittest.TestCase):
 
         def train_without_usage(X, *args, **kwargs):
             raw, projected, stats, timing, _ = fake_train(X)
-            return raw, projected, stats, timing, [{"job_id": "job-a", "quantum_seconds": None}]
+            return raw, projected, stats, timing, [{"job_id": "job-a", "quantum_seconds": 0}]
 
         class Job:
             def __init__(self, seconds):
@@ -139,7 +139,7 @@ class SiteMemoryIBMTests(unittest.TestCase):
                 return Job(self.seconds)
 
         patches = [
-            mock.patch.object(hw, "create_runtime_service", return_value=Service(None)),
+            mock.patch.object(hw, "create_runtime_service", return_value=Service(0)),  # IBM: 0 until final
             mock.patch.object(hw, "pick_backend", return_value=FakeBackend()),
             mock.patch.object(hw, "build_hardware_executor", return_value=(object(), object())),
             mock.patch.object(hw, "evaluate_hardware_kernel_train", side_effect=train_without_usage),

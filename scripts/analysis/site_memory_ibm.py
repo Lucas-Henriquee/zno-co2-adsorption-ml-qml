@@ -40,9 +40,9 @@ entries are used as measured. Raw hardware kernels, job ids, circuit statistics 
 reported quantum time are saved, so the analysis can be redone without the QPU
 (``--reuse-hardware DIR``).
 
-Quantum time: IBM may publish a job's usage only some time after the job finishes. The
-script re-reads the usage of every job after the last one ends (a few tries) and stores
-null, never 0, when it is still missing; ``--reuse-hardware DIR --refresh-usage`` reads it
+Quantum time: IBM may publish a job's usage only some time after the job finishes, and
+reports 0 until then. The script re-reads the usage of every job after the last one ends
+(a few tries) and stores null, never 0, when it is still missing; ``--reuse-hardware DIR --refresh-usage`` reads it
 again later (job metadata only, no circuits) and updates DIR/hardware_record.json.
 
 Safety: without ``--submit`` (and without ``--reuse-hardware``) the script only writes
@@ -267,6 +267,9 @@ def run_on_hardware(jobs: list[WindowJob], args, output: Path) -> tuple[dict, di
                 matrix, stats, timing, job_records = hw.evaluate_hardware_kernel_cross(
                     request["left"], request["right"], feature_map, sampler, pass_manager, args.shots,
                     args.max_circuits_per_job)
+            for job_record in job_records:  # IBM reports 0 until the usage is final
+                if not job_record.get("quantum_seconds"):
+                    job_record["quantum_seconds"] = None
             raw[request["name"]] = np.asarray(matrix, dtype=float)
             np.save(folder / f"{request['name']}.npy", raw[request["name"]])
             record["kernels"][request["name"]] = {
@@ -288,14 +291,14 @@ def write_record(folder: Path, record: dict) -> None:
 def usage_sum(job_records: list[dict]) -> float | None:
     """Sum of the jobs' quantum seconds; None when any job has no reported value."""
     values = [record.get("quantum_seconds") for record in job_records]
-    if not values or any(value is None for value in values):
+    if not values or any(not value for value in values):
         return None
     return float(sum(float(value) for value in values))
 
 
 def total_usage(record: dict) -> float | None:
     values = [kernel.get("quantum_seconds") for kernel in record["kernels"].values()]
-    if not values or any(value is None for value in values):
+    if not values or any(not value for value in values):
         return None
     return float(sum(values))
 
@@ -306,7 +309,7 @@ def refresh_usage(service, record: dict, tries: int, wait_s: float = 10.0) -> No
 
     for attempt in range(max(tries, 1)):
         missing = [job for kernel in record["kernels"].values() for job in kernel["jobs"]
-                   if job.get("quantum_seconds") is None and job.get("job_id")]
+                   if not job.get("quantum_seconds") and job.get("job_id")]
         if not missing:
             break
         if attempt:
@@ -317,8 +320,8 @@ def refresh_usage(service, record: dict, tries: int, wait_s: float = 10.0) -> No
             except Exception as exc:  # network or permission: keep None and report it
                 job["usage_error"] = str(exc)
                 continue
-            if usage.get("quantum_seconds") is not None:
-                job["quantum_seconds"] = float(usage["quantum_seconds"])
+            # A finished job that ran circuits never uses 0 s: 0 means "not final yet".
+            job["quantum_seconds"] = float(usage["quantum_seconds"]) if usage.get("quantum_seconds") else None
     for kernel in record["kernels"].values():
         kernel["quantum_seconds"] = usage_sum(kernel["jobs"])
 
