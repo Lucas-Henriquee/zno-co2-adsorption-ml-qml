@@ -139,6 +139,40 @@ the QSVM). The same steps, and the IBM comparison below, are in
 - Outputs: `site_memory_windows.csv`, `site_memory_predictions.csv`,
   `site_memory_features.csv`, `site_memory_summary.json`, `site_memory_curve.png`.
 
+### IBM Quantum account (once per machine)
+
+The hardware runs need a saved Qiskit Runtime account. The key is stored only in
+`~/.qiskit/qiskit-ibm.json` on that machine, never in a YAML file, a notebook or the
+repository. In the modeling environment (`conda activate qml-zno-modeling`):
+
+1. Sign in at [quantum.cloud.ibm.com](https://quantum.cloud.ibm.com) (an IBM Cloud
+   account). The free Open Plan gives a few minutes of QPU time per period; the current
+   allowance is on the dashboard.
+2. Create an API key: dashboard → **API key** → **Create**. Copy it when it is shown
+   (it is shown once) and keep it private.
+3. Copy the instance CRN: **Instances** → your instance → its CRN, which starts with
+   `crn:v1:`.
+4. Save the account. The key is asked hidden and does not enter the shell history:
+
+   ```bash
+   python -m scripts.models.qml_ibm.ibm_account save --name zno
+   ```
+
+   `--overwrite` replaces an account with the same name (for example after the key
+   expires); `--no-default` keeps another default account.
+5. Check the login and the backend. This reads metadata only: no circuit is sent and no
+   QPU time is used:
+
+   ```bash
+   python -m scripts.models.qml_ibm.ibm_account check --name zno --backend ibm_marrakesh
+   ```
+
+6. Pass `--account zno` (and `--backend`) to `site_memory_ibm.py`. Without `--account`
+   the default saved account is used.
+
+A key that leaked (pasted in a chat, committed, shared) should be deleted on the
+dashboard and replaced: create a new one and run step 4 with `--overwrite`.
+
 ### On IBM Quantum hardware
 
 `scripts/analysis/site_memory_ibm.py` evaluates the RBF SVM, the ideal QSVM and the
@@ -149,7 +183,8 @@ the same rows, splits, scaling and C:
 python -m scripts.analysis.site_memory_ibm --runs results/simulations/zno_md_100k \
   --window-starts-fs 0 800 --output-dir results/analyses/site_memory/ibm_100k            # plan only
 python -m scripts.analysis.site_memory_ibm --runs results/simulations/zno_md_100k \
-  --window-starts-fs 0 800 --output-dir results/analyses/site_memory/ibm_100k --submit   # QPU
+  --window-starts-fs 0 800 --account zno --backend ibm_marrakesh \
+  --output-dir results/analyses/site_memory/ibm_100k --submit                            # QPU
 ```
 
 - Without `--submit` the script writes the plan (circuits, shots) and evaluates the

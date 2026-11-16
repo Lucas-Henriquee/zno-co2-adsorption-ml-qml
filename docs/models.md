@@ -43,7 +43,7 @@ With `evaluation.protocol: grouped_27` (default in `zno_local.yaml`) `svm`, `qsv
 
 - `ibm` needs `--submit-ibm` and a backend (`--backend` or `ibm.backend`).
 - No tokens, API keys or instance credentials in YAML; use a saved Qiskit Runtime
-  account.
+  account ([how to save one](analysis.md#ibm-quantum-account-once-per-machine)).
 - IBM execution is never part of `run_all.sh`.
 
 ## Scope

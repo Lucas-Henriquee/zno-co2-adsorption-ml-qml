@@ -58,9 +58,9 @@ def invoked_modules(sources: list[str]) -> dict[str, set[str]]:
 
 
 @lru_cache(maxsize=None)
-def help_text(module: str) -> str:
+def help_text(module: str, subcommand: str | None = None) -> str:
     result = subprocess.run(
-        [sys.executable, "-m", module, "--help"],
+        [sys.executable, "-m", module, *([subcommand] if subcommand else []), "--help"],
         cwd=ROOT, capture_output=True, text=True, timeout=120,
         env={**os.environ, "MPLBACKEND": "Agg"},
     )
@@ -112,12 +112,13 @@ class NotebookModulesTest(unittest.TestCase):
 
     def test_analysis_options_are_accepted(self):
         modules = invoked_modules(code_sources(load(NOTEBOOKS["analysis"])))
-        models = models_commands()[0]
-        for command in models:
+        for command in models_commands()[0]:
             module = command[2]
+            if not command[3].startswith("--"):  # module with subcommands: check that subcommand
+                module = f"{module} {command[3]}"
             modules.setdefault(module, set()).update(arg for arg in command[3:] if arg.startswith("--"))
         for module, options in modules.items():
-            text = help_text(module)
+            text = help_text(*module.split(" ", 1))
             accepted = set(re.findall(r"--[A-Za-z0-9][A-Za-z0-9-]*", text))
             for option in options:
                 with self.subTest(module=module, option=option):
@@ -196,14 +197,18 @@ class ModelsNotebookTest(unittest.TestCase):
         modules = [command[2] for command in commands]
         runs = len(namespace["RUNS_100K"]) + len(namespace["RUNS_300K"])
         self.assertEqual(modules, ["scripts.analysis.md_trajectory_analysis"] * runs
-                         + ["scripts.analysis.site_memory"] * 2 + ["scripts.analysis.site_memory_ibm"] * 3)
+                         + ["scripts.analysis.site_memory"] * 2 + ["scripts.models.qml_ibm.ibm_account"]
+                         + ["scripts.analysis.site_memory_ibm"] * 3)
+        check = commands[-4]
+        self.assertEqual(check[3], "check")  # the notebook never saves the key
+        self.assertNotIn("save", check)
         plan, submit, reuse = commands[-3:]
         self.assertNotIn("--submit", plan)
         self.assertNotIn("--reuse-hardware", plan)
         self.assertIn("--submit", submit)
         self.assertIn("--reuse-hardware", reuse)
         self.assertNotIn("--submit", reuse)
-        outputs = [command[command.index("--output-dir") + 1] for command in commands]
+        outputs = [command[command.index("--output-dir") + 1] for command in commands if "--output-dir" in command]
         # The hardware run completes the plan's folder; every other command has its own.
         self.assertEqual(outputs[-3], outputs[-2])
         others = outputs[:-3] + outputs[-1:]
@@ -212,8 +217,8 @@ class ModelsNotebookTest(unittest.TestCase):
             self.assertTrue(output.startswith(str(ROOT / "results" / "analyses" / "site_memory")), output)
 
     def test_ibm_is_contacted_only_by_the_submit_flag(self):
-        flags = {name: True for name in ("RUN_FRAMES", "RUN_MEMORY_100K", "RUN_MEMORY_300K", "RUN_IBM_PLAN",
-                                         "RUN_IBM_REUSE")}
+        flags = {name: True for name in ("RUN_FRAMES", "RUN_MEMORY_100K", "RUN_MEMORY_300K", "RUN_IBM_CHECK",
+                                         "RUN_IBM_PLAN", "RUN_IBM_REUSE")}
         flags["RUN_IBM_SUBMIT"] = False
         commands, _ = models_commands(flags)
         self.assertFalse(any("--submit" in command for command in commands))
@@ -221,6 +226,11 @@ class ModelsNotebookTest(unittest.TestCase):
     def test_unfinished_runs_are_left_out(self):
         commands, _ = models_commands(finished=False)
         self.assertEqual([command for command in commands if "--runs" in command], [])
+
+    def test_notebook_holds_no_key(self):
+        code = "\n".join(code_sources(load(NOTEBOOKS["models"])))
+        for forbidden in ("save_account", "token=", "getpass", "crn:v1"):
+            self.assertNotIn(forbidden, code)
 
 
 class AnalysisNotebookWorkflowTest(unittest.TestCase):

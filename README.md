@@ -28,9 +28,13 @@ See [environments/README.md](environments/README.md).
 The Python workflow is the primary interface: the root launchers, or
 `python -m scripts.workflows.<stage>` with the same arguments inside an environment.
 The notebooks are a secondary, equivalent route:
-`notebooks/zno-co2-lucas.ipynb` runs the simulations and
-`notebooks/zno-co2-analysis.ipynb` the analyses of a run
+`notebooks/zno-co2-lucas.ipynb` runs the simulations,
+`notebooks/zno-co2-analysis.ipynb` the analyses of a run and
+`notebooks/zno-co2-models.ipynb` the site-memory models (SVM, QSVM, IBM QSVM)
 ([notebooks/README.md](notebooks/README.md)).
+
+IBM Quantum hardware runs need a saved account (API key and instance CRN, kept outside
+the repository): step by step in [docs/analysis.md](docs/analysis.md#ibm-quantum-account-once-per-machine).
 
 Each run writes to its own run directory, named by `--run-id` (default: next free
 `<prefix>_NN`), and keeps a `config.yaml` snapshot and a `run_manifest.json`.
