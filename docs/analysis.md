@@ -138,6 +138,13 @@ the QSVM). The same steps, and the IBM comparison below, are in
   trajectory of a site starts from the same DFT geometry).
 - Outputs: `site_memory_windows.csv`, `site_memory_predictions.csv`,
   `site_memory_features.csv`, `site_memory_summary.json`, `site_memory_curve.png`.
+- Comparison of saved folders (no recomputation): `python -m
+  scripts.analysis.site_memory_compare --inputs <100 K folder> <300 K folder> [sensitivity
+  folders] --output-dir results/analyses/site_memory/compare` writes the memory time,
+  first-window and late mean accuracy (windows from `--late-from-fs`, default 600 fs)
+  per folder and model, and a figure with one panel per temperature (reference setting:
+  linear entanglement, reps 1). It warns when the temperatures have different numbers
+  of seeds, and refuses folders with different window widths.
 
 ### IBM Quantum account (once per machine)
 

@@ -197,7 +197,8 @@ class ModelsNotebookTest(unittest.TestCase):
         modules = [command[2] for command in commands]
         runs = len(namespace["RUNS_100K"]) + len(namespace["RUNS_300K"])
         self.assertEqual(modules, ["scripts.analysis.md_trajectory_analysis"] * runs
-                         + ["scripts.analysis.site_memory"] * 2 + ["scripts.models.qml_ibm.ibm_account"]
+                         + ["scripts.analysis.site_memory"] * 2 + ["scripts.analysis.site_memory_compare"]
+                         + ["scripts.models.qml_ibm.ibm_account"]
                          + ["scripts.analysis.site_memory_ibm"] * 3 + ["scripts.analysis.site_memory_ibm_summary"])
         commands = commands[:-1]  # the summary only reads the folders above
         check = commands[-4]
@@ -218,7 +219,8 @@ class ModelsNotebookTest(unittest.TestCase):
             self.assertTrue(output.startswith(str(ROOT / "results" / "analyses" / "site_memory")), output)
 
     def test_ibm_is_contacted_only_by_the_submit_flag(self):
-        flags = {name: True for name in ("RUN_FRAMES", "RUN_MEMORY_100K", "RUN_MEMORY_300K", "RUN_IBM_CHECK",
+        flags = {name: True for name in ("RUN_FRAMES", "RUN_MEMORY_100K", "RUN_MEMORY_300K", "RUN_COMPARE",
+                                         "RUN_IBM_CHECK",
                                          "RUN_IBM_PLAN", "RUN_IBM_REUSE")}
         flags["RUN_IBM_SUBMIT"] = False
         commands, _ = models_commands(flags)
