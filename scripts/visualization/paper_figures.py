@@ -315,7 +315,7 @@ def fig04_data(results_dir: Path, material: str, sigma: float) -> pd.DataFrame |
         site_columns = {f"site_peak_{k + 1}_energy_ev": site_peaks[site][k] if k < len(shared) else float("nan")
                         for k in range(FIG04_N_PEAKS)}
         for energy, value in zip(grid, curve):
-            records.append({"site": site, "curve": site_label(site).lower(), "energy_ev": energy,
+            records.append({"site": site, "curve": site_label(site), "energy_ev": energy,
                             "intensity_per_ev": value, "absorption_au": value / scale, "sigma_ev": sigma,
                             **peak_columns, **site_columns})
     return pd.DataFrame(records)
@@ -418,7 +418,6 @@ def plot_fig05(data: pd.DataFrame):
     ax.set_xticklabels([STATE_LABELS[state] for state, _ in CO2RR_STATES])
     ax.set_xlabel("Reaction coordinate")
     ax.set_ylabel("ΔG (eV)")
-    ax.set_title(TITLES["fig05"])
     ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.24), ncol=1)
     return fig
 

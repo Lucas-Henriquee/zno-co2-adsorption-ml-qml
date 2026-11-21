@@ -13,8 +13,8 @@ Items (each skipped with a message when its inputs are not given):
 * ``neb_pbe_d3``  NEB path top metal -> bridge -> top oxygen, PBE and PBE-D3, each
   relative to its own top-metal image.
 * ``site_memory``  one panel per temperature: balanced accuracy against time for the SVM
-  (RBF), the standard QSVM and the scaled QSVM; filled markers p <= alpha; the dashed
-  line is a random guess (1 / number of sites).
+  (RBF), the standard QSVM and the scaled QSVM; the dashed line is a random guess
+  (1 / number of sites). Significance is in the table and the data CSV, not on the plot.
 * ``ibm_hardware``  one panel per temperature: correct predictions of the SVM, the ideal
   QSVM and the IBM QSVM in each hardware window (512 shots, reps 1; the first run of a
   repeated configuration), standard and scaled QSVM.
@@ -67,15 +67,17 @@ from scripts.visualization.paper_figures import (  # noqa: E402
 ITEMS = ("adsorption_pbe_d3", "neb_pbe_d3", "site_memory", "ibm_hardware", "table_site_memory",
          "table_adsorption", "supp_band_gap", "supp_height_time", "supp_qsvm_sensitivity", "supp_ibm_runs")
 METHODS = {"PBE": "#9e9e9e", "PBE-D3": "#3949ab"}
+# Models in black and greys (line style and marker tell them apart), so that the site
+# colours (blue, orange, green) keep meaning sites in every figure.
 MODEL_STYLE = {
-    "svm_rbf": ("SVM (RBF)", "#1f77b4", "s"),
-    "qsvm": ("QSVM (ZZ, standard)", "#ff7f0e", "o"),
-    "qsvm_bw": ("QSVM (ZZ, scaled)", "#2ca02c", "^"),
+    "svm_rbf": ("SVM (RBF)", "#000000", "s", "-"),
+    "qsvm": ("QSVM (ZZ, standard)", "#616161", "o", "--"),
+    "qsvm_bw": ("QSVM (ZZ, scaled)", "#a0a0a0", "^", ":"),
 }
 IBM_STYLE = {
-    "svm_rbf": ("SVM (RBF)", "#1f77b4", "s"),
-    "qsvm_ideal": ("QSVM ideal (simulator)", "#ff7f0e", "o"),
-    "qsvm_ibm": ("QSVM IBM (ibm_marrakesh)", "#d62728", "D"),
+    "svm_rbf": ("SVM (RBF)", "#000000", "s"),
+    "qsvm_ideal": ("QSVM ideal (simulator)", "#9e9e9e", "o"),
+    "qsvm_ibm": ("QSVM IBM (ibm_marrakesh)", "#c62828", "D"),
 }
 BANDWIDTH_NAMES = {"A": "standard", "B": "scaled"}
 MEMORY_MODELS = ("svm_rbf", "qsvm", "qsvm_bw")
@@ -256,34 +258,28 @@ def plot_memory(runs: list[dict]):
     for ax, letter, run in zip(axes[0], "abcd", runs):
         alpha = float(run["summary"]["alpha"])
         for model in MEMORY_MODELS:
-            label, color, marker = MODEL_STYLE[model]
+            label, color, marker, style = MODEL_STYLE[model]
             part = run["windows"][run["windows"]["model"] == model].sort_values("t_start_fs")
             if part.empty:
                 continue
             centre = 0.5 * (part["t_start_fs"] + part["t_end_fs"]).to_numpy()
             accuracy = part["balanced_accuracy"].to_numpy()
             significant = (part["p_value"] <= alpha).to_numpy()
-            ax.plot(centre, accuracy, color=color, linewidth=1.1, zorder=2)
-            ax.scatter(centre[~significant], accuracy[~significant], s=14, marker=marker, facecolor="white",
-                       edgecolor=color, linewidth=0.9, zorder=3)
-            ax.scatter(centre[significant], accuracy[significant], s=14, marker=marker, color=color, zorder=3)
+            ax.plot(centre, accuracy, color=color, linestyle=style, linewidth=1.2, marker=marker, markersize=3.6,
+                    zorder=3 if model == "svm_rbf" else 2)
             records += [{"temperature_k": run["temperature"], "model": model, "t_centre_fs": c,
                          "balanced_accuracy": a, "p_value": p, "significant": bool(s)}
                         for c, a, p, s in zip(centre, accuracy, part["p_value"], significant)]
-        ax.axhline(1.0 / n_sites, color="#757575", linestyle="--", linewidth=0.9)
+        ax.axhline(1.0 / n_sites, color="#c62828", linestyle="--", linewidth=0.9)
         ax.set_title(f"{run['temperature']:g} K", fontsize=9.5)
         ax.set_xlabel("Time from the start of the AIMD (fs)")
         ax.set_ylim(0.0, 1.05)
         panel_letter(ax, letter)
     axes[0][0].set_ylabel("Balanced accuracy")
-    handles = [Line2D([], [], color=MODEL_STYLE[m][1], marker=MODEL_STYLE[m][2], markersize=4.5,
-                      label=MODEL_STYLE[m][0]) for m in MEMORY_MODELS]
-    handles += [Line2D([], [], color="#757575", linestyle="--", label=CHANCE_LABEL.format(n=n_sites)),
-                Line2D([], [], color="#424242", marker="o", linestyle="none", markersize=4.5,
-                       label=f"filled: p ≤ {runs[0]['summary']['alpha']:g}"),
-                Line2D([], [], color="#424242", marker="o", markerfacecolor="white", linestyle="none",
-                       markersize=4.5, label="open: not significant")]
-    fig.legend(handles=handles, loc="lower center", bbox_to_anchor=(0.5, -0.16), ncol=3, fontsize=7.2)
+    handles = [Line2D([], [], color=MODEL_STYLE[m][1], marker=MODEL_STYLE[m][2], linestyle=MODEL_STYLE[m][3],
+                      markersize=4.5, label=MODEL_STYLE[m][0]) for m in MEMORY_MODELS]
+    handles.append(Line2D([], [], color="#c62828", linestyle="--", label=CHANCE_LABEL.format(n=n_sites)))
+    fig.legend(handles=handles, loc="lower center", bbox_to_anchor=(0.5, -0.13), ncol=4, fontsize=7.2)
     return fig, pd.DataFrame(records)
 
 
@@ -374,11 +370,13 @@ def ibm_main_rows(table: pd.DataFrame) -> pd.DataFrame:
 
 def plot_ibm(table: pd.DataFrame):
     temperatures = sorted(set(table["temperature_k"].dropna()))
-    rows_max = max(len(table[table["temperature_k"] == t]) for t in temperatures)
-    fig, axes = plt.subplots(1, len(temperatures), figsize=(3.4 * len(temperatures), 0.42 * rows_max + 1.4),
-                             sharex=True, constrained_layout=True, squeeze=False)
+    counts = [len(table[table["temperature_k"] == t]) for t in temperatures]
+    # Panels stacked, each as tall as its number of windows, so the rows have one spacing.
+    fig, axes = plt.subplots(len(temperatures), 1, figsize=(4.6, 0.36 * sum(counts) + 0.9 * len(temperatures)),
+                             sharex=True, constrained_layout=True, squeeze=False,
+                             gridspec_kw={"height_ratios": counts})
     records = []
-    for ax, letter, temperature in zip(axes[0], "abcd", temperatures):
+    for ax, letter, temperature in zip(axes[:, 0], "abcd", temperatures):
         part = table[table["temperature_k"] == temperature].sort_values(["t_start_fs", "bandwidth"])
         labels = [f"{t:g} fs, {BANDWIDTH_NAMES.get(b, b)}" for t, b in zip(part["t_start_fs"], part["bandwidth"])]
         y = np.arange(len(part))
@@ -395,15 +393,15 @@ def plot_ibm(table: pd.DataFrame):
                             "n_trajectories": int(row["n_trajectories"]), "folder": row["folder"]})
         ax.axvline(1.0 / 3.0, color="#757575", linestyle="--", linewidth=0.9)
         ax.set_yticks(y, labels, fontsize=7.5)
-        ax.invert_yaxis()
+        ax.set_ylim(len(part) - 0.5, -0.5)
         ax.set_xlim(0.0, 1.12)
-        ax.set_title(f"{temperature:g} K", fontsize=9.5)
-        ax.set_xlabel("Correct predictions (fraction)")
+        ax.text(0.01, 1.02, f"{temperature:g} K", transform=ax.transAxes, ha="left", va="bottom", fontsize=9)
         panel_letter(ax, letter)
+    axes[-1, 0].set_xlabel("Correct predictions (fraction of 18 trajectories)")
     handles = [Line2D([], [], color=c, marker=m, linestyle="none", markersize=5, label=n)
                for n, c, m in IBM_STYLE.values()]
     handles.append(Line2D([], [], color="#757575", linestyle="--", label=CHANCE_LABEL.format(n=3)))
-    fig.legend(handles=handles, loc="lower center", bbox_to_anchor=(0.5, -0.12), ncol=2, fontsize=7.2)
+    fig.legend(handles=handles, loc="upper center", bbox_to_anchor=(0.5, 0.0), ncol=2, fontsize=7.2)
     return fig, pd.DataFrame(records)
 
 
@@ -456,7 +454,7 @@ def main(argv=None) -> int:
             ax.bar(x + 0.19, pbe["adsorbed_band_gap_gamma_ev"], 0.38, color="#ef9a9a", label="Adsorbed CO$_2$")
             ax.set_xticks(x, [site_label(s).replace(" ", "\n") for s in pbe["site"]])
             ax.set_ylabel("Band gap at Γ (eV, PBE)")
-            ax.legend(loc="lower center")
+            ax.legend(loc="lower center", bbox_to_anchor=(0.5, 1.0), ncol=2)
             out.figure("supp_band_gap", fig, pbe, [runs["PBE"] / "dft_summary.csv"])
     elif wanted & {"adsorption_pbe_d3", "table_adsorption", "supp_band_gap"}:
         print("[skip] DFT items: give --pbe-run and/or --d3-run")

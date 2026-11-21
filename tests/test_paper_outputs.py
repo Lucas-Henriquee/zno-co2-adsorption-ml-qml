@@ -198,7 +198,7 @@ def test_figures_written_with_plotted_data(full):
     assert set(fig04["site"]) == set(SITES)
     assert fig04["energy_ev"].min() == pytest.approx(3.0)
     assert fig04["energy_ev"].max() == pytest.approx(11.4)  # last written transition + 4 sigma
-    assert set(fig04["curve"]) == {"top metal", "top oxygen", "bridge"}
+    assert set(fig04["curve"]) == {"Top metal", "Top oxygen", "Bridge"}
     # Two main peaks, shared by the three sites (identical spectra here).
     assert fig04["main_peak_1_energy_ev"].to_numpy() == pytest.approx(9.52, abs=0.01)
     assert fig04["main_peak_2_energy_ev"].to_numpy() == pytest.approx(11.0, abs=0.01)
@@ -441,7 +441,7 @@ def test_fig04_layout(full):
     # Each main peak labelled once (not once per site), without site names.
     assert sorted(t for t in texts if t.endswith(" eV")) == ["11.00 eV", "9.52 eV"]
     legend = [t.get_text() for t in ax.get_legend().get_texts()]
-    assert legend == ["top metal", "top oxygen", "bridge"]
+    assert legend == ["Top metal", "Top oxygen", "Bridge"]
     # No vertical line other than the 400 nm and 200 nm region edges (no ionization threshold line).
     vertical = {round(float(line.get_xdata()[0]), 3) for line in ax.get_lines() if len(set(line.get_xdata())) == 1}
     assert vertical == {round(paper_figures.HC_EV_NM / 400.0, 3), round(paper_figures.HC_EV_NM / 200.0, 3)}
