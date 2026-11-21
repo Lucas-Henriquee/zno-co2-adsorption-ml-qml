@@ -112,7 +112,7 @@ def plot(references: list[dict], models: list[str], path: Path) -> None:
             ax.plot(centre[significant], part["balanced_accuracy"][significant], linestyle="none", marker="o",
                     markersize=3.2, color=line.get_color())
         ax.axhline(run["summary"]["chance_level"], color="#777777", linestyle="--", linewidth=0.9,
-                   label="Chance")
+                   label=f"Random guess (1/{len(run['summary']['sites'])})")
         ax.set_title(f"{run['temperature']:g} K ({run['seeds']} seeds)", fontsize=9)
         ax.set_xlabel("Time from the start of the AIMD (fs)")
         ax.set_ylim(-0.03, 1.05)

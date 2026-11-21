@@ -36,6 +36,36 @@ registry rows then have an empty sha256). PyMOL (`pymol-open-source`, conda-forg
 optional. The registry note names the renderer, read from `render_info.json`. To
 re-render by hand: `pymol fig01_adsorption_structures.pml` in A/`paper/fig01_pymol/`.
 
+## Site-memory study
+
+`scripts.visualization.paper_site_memory_figures` draws the items of the site-memory
+study from saved outputs only (no DFT, MD, model or IBM run):
+
+```bash
+python -m scripts.visualization.paper_site_memory_figures \
+  --pbe-run results/simulations/zno_ic_final --d3-run results/simulations/zno_d3_stage1 \
+  --memory-100k results/analyses/site_memory/100k_6seeds \
+  --memory-300k results/analyses/site_memory/300k_v2 \
+  --sensitivity results/analyses/site_memory/{100k_6seeds,300k}_{circular,full,reps2} \
+  --ibm-summaries results/analyses/site_memory/ibm_summary_100k results/analyses/site_memory/ibm_summary_300k \
+  --output-dir results/analyses/site_memory/paper
+```
+
+| Item | Shows | Caveat |
+| --- | --- | --- |
+| `adsorption_pbe_d3` | (a) E_ads, (b) C height above the topmost surface atom, PBE and PBE-D3 | Differences up to ~0.05 eV are not resolved |
+| `neb_pbe_d3` | NEB path top metal → bridge → top oxygen, PBE and PBE-D3, each relative to its top-metal image | 3 internal images per band; no internal saddle in any band |
+| `site_memory` | Balanced accuracy against time at 100 K and 300 K: SVM (RBF), QSVM (ZZ, standard), QSVM (ZZ, scaled); filled markers p ≤ 0.05; dashed line random guess (1/3) | Memory times are comparable only with the same number of seeds |
+| `ibm_hardware` | Correct predictions of SVM, ideal QSVM and IBM QSVM per hardware window and temperature (512 shots, reps 1, first run of a repeated configuration) | 18 trajectories per window; differences of 1-2 are within the run-to-run variation |
+| `table_site_memory`, `table_adsorption` | Memory time and accuracies per model and temperature; E_ads PBE and PBE-D3 | A memory that lasts to the last window is written as ">= ... (whole run)" |
+| `supp_band_gap`, `supp_height_time`, `supp_qsvm_sensitivity`, `supp_ibm_runs` | Γ gap (PBE); C height against time (mean and seed range); QSVM feature-map sensitivity; every IBM window | Supplementary |
+
+"Scaled" is the QSVM whose features are multiplied by λ ≤ 1, chosen from the training
+features only so that its kernel is as wide as the RBF kernel (bandwidth; Shaydulin &
+Wild 2022). Figures come as PNG and PDF with a `_data.csv`; `registry.csv` lists every
+file, its sha256 and its inputs. The structures, TDDFT spectra and CO₂RR pathway come
+from the paper stage above.
+
 ## Model run
 
 ```bash

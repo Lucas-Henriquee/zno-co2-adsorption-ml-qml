@@ -202,7 +202,7 @@ def plot_summary(table: pd.DataFrame, path: Path) -> None:
         fraction = table[f"{model}_correct"] / table["n_trajectories"]
         ax.plot(fraction, y + offset, linestyle="none", marker=marker, markersize=5, label=name)
     chance = 1.0 / 3.0
-    ax.axvline(chance, color="#777777", linestyle="--", linewidth=0.9, label="Chance")
+    ax.axvline(chance, color="#777777", linestyle="--", linewidth=0.9, label="Random guess (1/3)")
     ax.set_yticks(y, labels, fontsize=7)
     ax.invert_yaxis()
     ax.set_xlim(0, 1.05)

@@ -86,8 +86,8 @@ QSVM_MODELS = ("qsvm", "qsvm_bw")
 DEFAULT_MODELS = MODELS
 PLOTTED_MODELS = ("svm_rbf", "qsvm", "qsvm_bw", "nearest_centroid")
 MODEL_LABELS = {"majority": "Majority", "nearest_centroid": "Nearest centroid", "logistic": "Logistic",
-                "svm_rbf": "SVM (RBF)", "qsvm": "QSVM (ZZ)",
-                "qsvm_bw": "QSVM (ZZ, matched bandwidth)"}
+                "svm_rbf": "SVM (RBF)", "qsvm": "QSVM (ZZ, standard)",
+                "qsvm_bw": "QSVM (ZZ, scaled)"}
 MD_KEYS = ("temperature_kelvin", "timestep_fs", "log_interval", "equilibration_steps")
 
 
@@ -406,7 +406,8 @@ def plot_curve(windows: pd.DataFrame, path: Path, title: str, alpha: float, n_cl
         significant = part["p_value"] <= alpha
         ax.plot(centre[significant], part["balanced_accuracy"][significant], linestyle="none", marker="o",
                 markersize=3.5, color=line.get_color())
-    ax.axhline(1.0 / n_classes, color="#777777", linestyle="--", linewidth=0.9, label="Chance")
+    ax.axhline(1.0 / n_classes, color="#777777", linestyle="--", linewidth=0.9,
+               label=f"Random guess (1/{n_classes})")
     ax.set_xlabel("Time from the start of the AIMD (fs)")
     ax.set_ylabel("Balanced accuracy")
     ax.set_ylim(-0.03, 1.05)
